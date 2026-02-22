@@ -2,13 +2,13 @@
 
 #include "adapterfactory.h"
 
-namespace phicore {
+namespace phicore::adapter {
 
 class OnkyoAdapterFactory : public AdapterFactory
 {
     Q_OBJECT
     Q_PLUGIN_METADATA(IID PHI_ADAPTER_FACTORY_IID)
-    Q_INTERFACES(phicore::AdapterFactory)
+    Q_INTERFACES(phicore::adapter::AdapterFactory)
 
 public:
     explicit OnkyoAdapterFactory(QObject *parent = nullptr)
@@ -34,4 +34,4 @@ public:
     AdapterInterface *create(QObject *parent = nullptr) override;
 };
 
-} // namespace phicore
+} // namespace phicore::adapter

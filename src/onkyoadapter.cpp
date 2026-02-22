@@ -56,7 +56,7 @@ static QHash<QString, QString> buildInputLabelMap()
 
 Q_LOGGING_CATEGORY(adapterLog, "phi-core.adapters.onkyo");
 
-namespace phicore {
+namespace phicore::adapter {
 
 static QString inferModelFromIdentifier(const QString &raw)
 {
@@ -861,4 +861,4 @@ Channel OnkyoAdapter::buildInputChannel() const
     return input;
 }
 
-} // namespace phicore
+} // namespace phicore::adapter

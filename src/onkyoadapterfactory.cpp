@@ -8,7 +8,7 @@
 #include <QStringList>
 #include <QTcpSocket>
 
-namespace phicore {
+namespace phicore::adapter {
 
 static const QByteArray kOnkyoIconSvg = QByteArrayLiteral(
     "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" "
@@ -414,4 +414,4 @@ AdapterInterface *OnkyoAdapterFactory::create(QObject *parent)
     return new OnkyoAdapter(parent);
 }
 
-} // namespace phicore
+} // namespace phicore::adapter

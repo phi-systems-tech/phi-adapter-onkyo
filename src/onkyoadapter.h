@@ -7,7 +7,7 @@
 #include <QTimer>
 class QTcpSocket;
 
-namespace phicore {
+namespace phicore::adapter {
 
 class OnkyoAdapter : public AdapterInterface
 {
@@ -68,4 +68,4 @@ private:
     QTimer *m_pollTimer = nullptr;
 };
 
-} // namespace phicore
+} // namespace phicore::adapter
