@@ -10,6 +10,26 @@
 
 namespace phicore::adapter {
 
+namespace {
+
+void applyDefaultFieldScopes(AdapterConfigSchema &schema)
+{
+    for (AdapterConfigField &field : schema.fields) {
+        const QString scope = field.meta.value(QStringLiteral("scope")).toString().trimmed().toLower();
+        if (scope == QStringLiteral("factory")
+            || scope == QStringLiteral("instance")
+            || scope == QStringLiteral("both")) {
+            continue;
+        }
+        const bool instanceOnly =
+            (static_cast<int>(field.flags) & static_cast<int>(AdapterConfigFieldFlag::InstanceOnly)) != 0;
+        field.meta.insert(QStringLiteral("scope"),
+                          instanceOnly ? QStringLiteral("instance") : QStringLiteral("both"));
+    }
+}
+
+} // namespace
+
 static const QByteArray kOnkyoIconSvg = QByteArrayLiteral(
     "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" "
     "xmlns=\"http://www.w3.org/2000/svg\" role=\"img\" aria-label=\"Receiver icon\">\n"
@@ -61,13 +81,27 @@ AdapterCapabilities OnkyoAdapterFactory::capabilities() const
     settings.label = QStringLiteral("Settings");
     settings.description = QStringLiteral("Edit receiver connection settings.");
     settings.hasForm = true;
+    settings.meta.insert(QStringLiteral("placement"), QStringLiteral("card"));
+    settings.meta.insert(QStringLiteral("kind"), QStringLiteral("open_dialog"));
+    settings.meta.insert(QStringLiteral("requiresAck"), true);
     caps.instanceActions.push_back(settings);
     AdapterActionDescriptor probeCurrentAction;
     probeCurrentAction.id = QStringLiteral("probeCurrentInput");
     probeCurrentAction.label = QStringLiteral("Probe current");
     probeCurrentAction.description = QStringLiteral("Read current input (SLI) from the receiver.");
+    probeCurrentAction.meta.insert(QStringLiteral("placement"), QStringLiteral("form_field"));
+    probeCurrentAction.meta.insert(QStringLiteral("kind"), QStringLiteral("command"));
+    probeCurrentAction.meta.insert(QStringLiteral("requiresAck"), true);
     probeCurrentAction.meta.insert(QStringLiteral("resultField"), QStringLiteral("currentInputCode"));
     caps.instanceActions.push_back(probeCurrentAction);
+    AdapterActionDescriptor probeAction;
+    probeAction.id = QStringLiteral("probe");
+    probeAction.label = QStringLiteral("Test connection");
+    probeAction.description = QStringLiteral("Reachability & command check");
+    probeAction.meta.insert(QStringLiteral("placement"), QStringLiteral("card"));
+    probeAction.meta.insert(QStringLiteral("kind"), QStringLiteral("command"));
+    probeAction.meta.insert(QStringLiteral("requiresAck"), true);
+    caps.factoryActions.push_back(probeAction);
     return caps;
 }
 
@@ -126,6 +160,7 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
     hostField.flags = AdapterConfigFieldFlag::Required;
     if (!resolvedHost.isEmpty())
         hostField.defaultValue = resolvedHost;
+    hostField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
     schema.fields.push_back(hostField);
 
     AdapterConfigField portField;
@@ -137,6 +172,7 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
     } else {
         portField.defaultValue = 60128;
     }
+    portField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
     schema.fields.push_back(portField);
 
     AdapterConfigField pollField;
@@ -144,6 +180,7 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
     pollField.label = QStringLiteral("Poll interval");
     pollField.type = AdapterConfigFieldType::Integer;
     pollField.defaultValue = 5000;
+    pollField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
     schema.fields.push_back(pollField);
 
     AdapterConfigField retryField;
@@ -152,6 +189,7 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
     retryField.description = QStringLiteral("Reconnect interval while the receiver is offline.");
     retryField.type = AdapterConfigFieldType::Integer;
     retryField.defaultValue = 10000;
+    retryField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
     schema.fields.push_back(retryField);
 
     AdapterConfigField volumeMaxField;
@@ -160,6 +198,7 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
     volumeMaxField.type = AdapterConfigFieldType::Integer;
     volumeMaxField.flags = AdapterConfigFieldFlag::InstanceOnly;
     volumeMaxField.defaultValue = 160;
+    volumeMaxField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
     schema.fields.push_back(volumeMaxField);
 
 
@@ -339,6 +378,7 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
         schema.fields.push_back(transcoderField);
     }
 
+    applyDefaultFieldScopes(schema);
     return schema;
 }
 
