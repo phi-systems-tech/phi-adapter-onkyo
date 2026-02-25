@@ -100,25 +100,13 @@ AdapterCapabilities OnkyoAdapterFactory::capabilities() const
 
 discovery::DiscoveryQueryList OnkyoAdapterFactory::discoveryQueries() const
 {
-    discovery::DiscoveryQuery deviceQuery;
-    deviceQuery.pluginType = pluginType();
-    deviceQuery.kind = discovery::DiscoveryKind::Mdns;
-    deviceQuery.mdnsServiceType = QStringLiteral("_sues800device._tcp");
-    deviceQuery.defaultPort = 60128;
-
-    discovery::DiscoveryQuery groupingQuery;
-    groupingQuery.pluginType = pluginType();
-    groupingQuery.kind = discovery::DiscoveryKind::Mdns;
-    groupingQuery.mdnsServiceType = QStringLiteral("_suegrouping._tcp");
-    groupingQuery.defaultPort = 60128;
-
     discovery::DiscoveryQuery iscpQuery;
     iscpQuery.pluginType = pluginType();
     iscpQuery.kind = discovery::DiscoveryKind::Mdns;
     iscpQuery.mdnsServiceType = QStringLiteral("_iscp._tcp");
     iscpQuery.defaultPort = 60128;
 
-    return { deviceQuery, groupingQuery, iscpQuery };
+    return { iscpQuery };
 }
 
 AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
