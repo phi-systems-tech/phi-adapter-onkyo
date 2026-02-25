@@ -12,20 +12,13 @@ namespace phicore::adapter {
 
 namespace {
 
-void applyDefaultFieldScopes(AdapterConfigSchema &schema)
+void addFieldByLegacyScope(AdapterConfigSchema &schema, const AdapterConfigField &field)
 {
-    for (AdapterConfigField &field : schema.fields) {
-        const QString scope = field.meta.value(QStringLiteral("scope")).toString().trimmed().toLower();
-        if (scope == QStringLiteral("factory")
-            || scope == QStringLiteral("instance")
-            || scope == QStringLiteral("both")) {
-            continue;
-        }
-        const bool instanceOnly =
-            (static_cast<int>(field.flags) & static_cast<int>(AdapterConfigFieldFlag::InstanceOnly)) != 0;
-        field.meta.insert(QStringLiteral("scope"),
-                          instanceOnly ? QStringLiteral("instance") : QStringLiteral("both"));
-    }
+    const bool instanceOnly =
+        (static_cast<int>(field.flags) & static_cast<int>(AdapterConfigFieldFlag::InstanceOnly)) != 0;
+    if (!instanceOnly)
+        schema.factory.fields.push_back(field);
+    schema.instance.fields.push_back(field);
 }
 
 } // namespace
@@ -131,8 +124,10 @@ discovery::DiscoveryQueryList OnkyoAdapterFactory::discoveryQueries() const
 AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
 {
     AdapterConfigSchema schema;
-    schema.title = QStringLiteral("Onkyo / Pioneer Receiver");
-    schema.description = QStringLiteral("Configure connection to an Onkyo/Pioneer receiver (ISCP).");
+    schema.factory.title = QStringLiteral("Onkyo / Pioneer Receiver");
+    schema.factory.description = QStringLiteral("Configure connection to an Onkyo/Pioneer receiver (ISCP).");
+    schema.instance.title = schema.factory.title;
+    schema.instance.description = schema.factory.description;
 
     const QJsonObject txt = info.meta.value(QStringLiteral("txt")).toObject();
     const QString discoveredName =
@@ -160,8 +155,8 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
     hostField.flags = AdapterConfigFieldFlag::Required;
     if (!resolvedHost.isEmpty())
         hostField.defaultValue = resolvedHost;
-    hostField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
-    schema.fields.push_back(hostField);
+    hostField.parentActionId = QStringLiteral("settings");
+    addFieldByLegacyScope(schema, hostField);
 
     AdapterConfigField portField;
     portField.key = QStringLiteral("port");
@@ -172,16 +167,16 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
     } else {
         portField.defaultValue = 60128;
     }
-    portField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
-    schema.fields.push_back(portField);
+    portField.parentActionId = QStringLiteral("settings");
+    addFieldByLegacyScope(schema, portField);
 
     AdapterConfigField pollField;
     pollField.key = QStringLiteral("pollIntervalMs");
     pollField.label = QStringLiteral("Poll interval");
     pollField.type = AdapterConfigFieldType::Integer;
     pollField.defaultValue = 5000;
-    pollField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
-    schema.fields.push_back(pollField);
+    pollField.parentActionId = QStringLiteral("settings");
+    addFieldByLegacyScope(schema, pollField);
 
     AdapterConfigField retryField;
     retryField.key = QStringLiteral("retryIntervalMs");
@@ -189,8 +184,8 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
     retryField.description = QStringLiteral("Reconnect interval while the receiver is offline.");
     retryField.type = AdapterConfigFieldType::Integer;
     retryField.defaultValue = 10000;
-    retryField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
-    schema.fields.push_back(retryField);
+    retryField.parentActionId = QStringLiteral("settings");
+    addFieldByLegacyScope(schema, retryField);
 
     AdapterConfigField volumeMaxField;
     volumeMaxField.key = QStringLiteral("volumeMaxRaw");
@@ -198,8 +193,8 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
     volumeMaxField.type = AdapterConfigFieldType::Integer;
     volumeMaxField.flags = AdapterConfigFieldFlag::InstanceOnly;
     volumeMaxField.defaultValue = 160;
-    volumeMaxField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
-    schema.fields.push_back(volumeMaxField);
+    volumeMaxField.parentActionId = QStringLiteral("settings");
+    addFieldByLegacyScope(schema, volumeMaxField);
 
 
     AdapterConfigField activeInputsField;
@@ -208,7 +203,7 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
     activeInputsField.type = AdapterConfigFieldType::Select;
     activeInputsField.flags = AdapterConfigFieldFlag::Multi | AdapterConfigFieldFlag::InstanceOnly;
     activeInputsField.defaultValue = QStringList();
-    activeInputsField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
+    activeInputsField.parentActionId = QStringLiteral("settings");
 
     struct InputLabelField {
         const char *code;
@@ -282,7 +277,7 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
             : it.value();
         activeInputsField.options.push_back(opt);
     }
-    schema.fields.push_back(activeInputsField);
+    addFieldByLegacyScope(schema, activeInputsField);
     for (auto it = inputLabelMap.constBegin(); it != inputLabelMap.constEnd(); ++it) {
         const QString code = it.key();
         AdapterConfigField mapField;
@@ -293,10 +288,11 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
         mapField.defaultValue = it.value().isEmpty()
             ? QStringLiteral("SLI %1").arg(code)
             : it.value();
-        mapField.meta.insert(QStringLiteral("requiresChoice"), QStringLiteral("activeSliCodes"));
-        mapField.meta.insert(QStringLiteral("choiceValue"), code);
-        mapField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
-        schema.fields.push_back(mapField);
+        mapField.visibility.fieldKey = QStringLiteral("activeSliCodes");
+        mapField.visibility.op = AdapterConfigVisibilityOp::Contains;
+        mapField.visibility.value = code;
+        mapField.parentActionId = QStringLiteral("settings");
+        addFieldByLegacyScope(schema, mapField);
     }
 
     AdapterConfigField currentInputField;
@@ -309,8 +305,8 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
     currentInputField.actionId = QStringLiteral("probeCurrentInput");
     currentInputField.actionLabel = QStringLiteral("Probe current");
     currentInputField.meta.insert(QStringLiteral("appendTo"), QStringLiteral("activeSliCodes"));
-    currentInputField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
-    schema.fields.push_back(currentInputField);
+    currentInputField.parentActionId = QStringLiteral("settings");
+    addFieldByLegacyScope(schema, currentInputField);
 
     if (!discoveredName.isEmpty()) {
         AdapterConfigField nameField;
@@ -319,8 +315,8 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
         nameField.type = AdapterConfigFieldType::String;
         nameField.flags = AdapterConfigFieldFlag::ReadOnly | AdapterConfigFieldFlag::InstanceOnly;
         nameField.defaultValue = discoveredName;
-        nameField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
-        schema.fields.push_back(nameField);
+        nameField.parentActionId = QStringLiteral("settings");
+        addFieldByLegacyScope(schema, nameField);
     }
 
     if (!discoveredManufacturer.isEmpty()) {
@@ -330,8 +326,8 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
         manufacturerField.type = AdapterConfigFieldType::String;
         manufacturerField.flags = AdapterConfigFieldFlag::ReadOnly | AdapterConfigFieldFlag::InstanceOnly;
         manufacturerField.defaultValue = discoveredManufacturer;
-        manufacturerField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
-        schema.fields.push_back(manufacturerField);
+        manufacturerField.parentActionId = QStringLiteral("settings");
+        addFieldByLegacyScope(schema, manufacturerField);
     }
 
     if (!discoveredModel.isEmpty()) {
@@ -341,8 +337,8 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
         modelField.type = AdapterConfigFieldType::String;
         modelField.flags = AdapterConfigFieldFlag::ReadOnly | AdapterConfigFieldFlag::InstanceOnly;
         modelField.defaultValue = discoveredModel;
-        modelField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
-        schema.fields.push_back(modelField);
+        modelField.parentActionId = QStringLiteral("settings");
+        addFieldByLegacyScope(schema, modelField);
     }
 
     if (!discoveredUuid.isEmpty()) {
@@ -352,8 +348,8 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
         uuidField.type = AdapterConfigFieldType::String;
         uuidField.flags = AdapterConfigFieldFlag::ReadOnly | AdapterConfigFieldFlag::InstanceOnly;
         uuidField.defaultValue = discoveredUuid;
-        uuidField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
-        schema.fields.push_back(uuidField);
+        uuidField.parentActionId = QStringLiteral("settings");
+        addFieldByLegacyScope(schema, uuidField);
     }
 
     if (supportsSpotify) {
@@ -363,8 +359,8 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
         spotifyField.type = AdapterConfigFieldType::Boolean;
         spotifyField.flags = AdapterConfigFieldFlag::ReadOnly | AdapterConfigFieldFlag::InstanceOnly;
         spotifyField.defaultValue = true;
-        spotifyField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
-        schema.fields.push_back(spotifyField);
+        spotifyField.parentActionId = QStringLiteral("settings");
+        addFieldByLegacyScope(schema, spotifyField);
     }
 
     if (supportsTranscoder) {
@@ -374,11 +370,10 @@ AdapterConfigSchema OnkyoAdapterFactory::configSchema(const Adapter &info) const
         transcoderField.type = AdapterConfigFieldType::Boolean;
         transcoderField.flags = AdapterConfigFieldFlag::ReadOnly | AdapterConfigFieldFlag::InstanceOnly;
         transcoderField.defaultValue = true;
-        transcoderField.meta.insert(QStringLiteral("parentAction"), QStringLiteral("settings"));
-        schema.fields.push_back(transcoderField);
+        transcoderField.parentActionId = QStringLiteral("settings");
+        addFieldByLegacyScope(schema, transcoderField);
     }
 
-    applyDefaultFieldScopes(schema);
     return schema;
 }
 
