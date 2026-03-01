@@ -15,56 +15,52 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Network)
 
-set(PHI_ADAPTER_API_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../phi-adapter-api" CACHE PATH
-    "Path to local phi-adapter-api checkout. If not found, find_package(phi-adapter-api) is used."
+option(PHI_ADAPTER_ONKYO_BUILD_IPC
+    "Build IPC sidecar executable for onkyo adapter"
+    ON
 )
 
-if(EXISTS "${PHI_ADAPTER_API_SOURCE_DIR}/CMakeLists.txt")
-    message(STATUS "Using local phi-adapter-api from: ${PHI_ADAPTER_API_SOURCE_DIR}")
-    add_subdirectory("${PHI_ADAPTER_API_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/phi-adapter-api")
-    set(PHI_ADAPTER_API_INCLUDE_DIR "${PHI_ADAPTER_API_SOURCE_DIR}/include/phi/adapter/api")
-else()
-    message(STATUS "Using installed phi-adapter-api via find_package")
-    find_package(phi-adapter-api CONFIG REQUIRED)
-    find_path(PHI_ADAPTER_API_INCLUDE_DIR
-        NAMES adapterinterface.h
-        PATH_SUFFIXES phi/adapter/api
+set(PHI_ADAPTER_SDK_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../phi-adapter-sdk" CACHE PATH
+    "Path to local phi-adapter-sdk checkout. If not found, find_package(phi-adapter-sdk) is used."
+)
+option(PHI_ADAPTER_ONKYO_USE_LOCAL_ADAPTER_SDK
+    "Use local ../phi-adapter-sdk checkout when available"
+    ON
+)
+
+if(PHI_ADAPTER_ONKYO_BUILD_IPC)
+    if(NOT TARGET phi::adapter-sdk)
+        if(PHI_ADAPTER_ONKYO_USE_LOCAL_ADAPTER_SDK AND EXISTS "${PHI_ADAPTER_SDK_SOURCE_DIR}/CMakeLists.txt")
+            message(STATUS "Using local phi-adapter-sdk from: ${PHI_ADAPTER_SDK_SOURCE_DIR}")
+            add_subdirectory("${PHI_ADAPTER_SDK_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/phi-adapter-sdk")
+        else()
+            message(STATUS "Using installed phi-adapter-sdk via find_package")
+            find_package(phi-adapter-sdk CONFIG REQUIRED)
+        endif()
+    endif()
+
+    if(NOT TARGET phi::adapter-sdk)
+        message(FATAL_ERROR "phi-adapter-sdk target phi::adapter-sdk not found")
+    endif()
+
+    add_executable(phi_adapter_onkyo_ipc
+        src/onkyoipcmain.cpp
+    )
+
+    target_compile_features(phi_adapter_onkyo_ipc PRIVATE cxx_std_20)
+
+    target_link_libraries(phi_adapter_onkyo_ipc
+        PRIVATE
+            Qt6::Core
+            Qt6::Network
+            phi::adapter-sdk
+    )
+
+    set_target_properties(phi_adapter_onkyo_ipc PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins/adapters"
+    )
+
+    install(TARGETS phi_adapter_onkyo_ipc
+        RUNTIME DESTINATION lib/phi/plugins/adapters
     )
 endif()
-
-if(NOT TARGET phi::adapter-api)
-    message(FATAL_ERROR "phi-adapter-api target phi::adapter-api not found")
-endif()
-
-if(NOT PHI_ADAPTER_API_INCLUDE_DIR)
-    message(FATAL_ERROR "Could not resolve phi-adapter-api header include directory")
-endif()
-
-add_library(phi_adapter_onkyo MODULE
-    src/onkyoadapter.cpp
-    src/onkyoadapter.h
-    src/onkyoadapterfactory.cpp
-    src/onkyoadapterfactory.h
-    ${PHI_ADAPTER_API_INCLUDE_DIR}/adapterinterface.h
-    ${PHI_ADAPTER_API_INCLUDE_DIR}/adapterfactory.h
-)
-
-target_include_directories(phi_adapter_onkyo
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-)
-
-target_link_libraries(phi_adapter_onkyo
-    PRIVATE
-        Qt6::Core
-        Qt6::Network
-        phi::adapter-api
-)
-
-set_target_properties(phi_adapter_onkyo PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins/adapters"
-)
-
-install(TARGETS phi_adapter_onkyo
-    LIBRARY DESTINATION lib/phi/plugins/adapters
-)
