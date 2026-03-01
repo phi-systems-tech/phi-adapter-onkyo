@@ -32,23 +32,35 @@ Provides local network command/control integration for Onkyo/Pioneer receivers.
 ### Features
 
 - Device communication over LAN
-- Logging category `phi-core.adapters.onkyo`
+- IPC sidecar executable using `phi-adapter-sdk`
+- Descriptor-driven config schema (`configSchema`) sent during bootstrap
+- Factory action `probe` (`Test connection`) handled via IPC
+- Instance actions `settings` and `probeCurrentInput`
 
 ### Runtime Requirements
 
-- phi-core with plugin loading enabled
+- phi-core with IPC adapter runtime enabled
 - Network access to receiver endpoints
 
 ### Build Requirements
 
 - `cmake`
 - Qt6 modules: `Core`, `Network`
-- `phi-adapter-api` (local checkout or installed package)
+- `phi-adapter-sdk` (local checkout in `../phi-adapter-sdk` or installed package)
 
 ### Configuration
 
 - No dedicated config file in this repository
 - Device settings are configured through phi-core
+- Factory scope fields:
+  - `host`
+  - `port` (ISCP port, typically `60128`)
+  - `pollIntervalMs`
+  - `retryIntervalMs`
+- Instance scope fields:
+  - `volumeMaxRaw`
+  - `activeSliCodes`
+  - `currentInputCode` (read-only helper, populated by `probeCurrentInput`)
 
 ### Build
 
@@ -59,7 +71,7 @@ cmake --build build --parallel
 
 ### Installation
 
-- Build output: `build/plugins/adapters/libphi_adapter_onkyo.so`
+- Build output: `build/plugins/adapters/phi_adapter_onkyo_ipc`
 - Deploy to: `/opt/phi/plugins/adapters/`
 
 ### Troubleshooting
@@ -67,6 +79,8 @@ cmake --build build --parallel
 - Error: device does not respond
 - Cause: wrong endpoint or network reachability issues
 - Fix: validate host/port and connectivity from phi-core host
+- Symptom: discovery resolves to HTTP port (`80`) instead of ISCP
+- Fix: set `port` explicitly in adapter config (for example `60128`)
 
 ### Maintainers
 
