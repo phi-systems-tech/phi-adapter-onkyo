@@ -266,10 +266,21 @@ public:
     void onBootstrap(const sdk::BootstrapRequest &request) override
     {
         AdapterSidecar::onBootstrap(request);
+        m_started = false;
+        m_stopping = false;
+        m_synced = false;
+        m_lastSeenMs = 0;
+        m_lastConnectAttemptMs = 0;
+        m_lastConnectLogMs = 0;
+        m_lastConnectError.clear();
+        setConnected(false);
+    }
 
+    void onConfigChanged(const sdk::ConfigChangedRequest &request) override
+    {
+        AdapterSidecar::onConfigChanged(request);
         m_info = request.adapter;
-        m_meta = parseJsonObject(m_info.metaJson);
-
+        m_meta = parseJsonObject(request.adapter.metaJson);
         applyConfig();
         m_synced = false;
         m_deviceId = resolveDeviceId();
@@ -284,6 +295,10 @@ public:
         emitDeviceSnapshot();
         requestInitialState();
         scheduleNextPoll();
+
+        std::cerr << "onkyo-ipc config.changed adapterId=" << request.adapterId
+                  << " externalId=" << request.adapter.externalId
+                  << " pluginType=" << request.adapter.pluginType << '\n';
     }
 
     void onDisconnected() override
@@ -386,8 +401,8 @@ public:
                 resp.status = v1::CmdStatus::Success;
                 resp.finalValue = *on;
             } else {
-                resp.status = v1::CmdStatus::TemporarilyOffline;
-                resp.error = "Receiver unavailable";
+                resp.status = unavailableCommandStatus();
+                resp.error = unavailableCommandMessage();
             }
             return resp;
         }
@@ -410,8 +425,8 @@ public:
                 resp.status = v1::CmdStatus::Success;
                 resp.finalValue = clampedPercent;
             } else {
-                resp.status = v1::CmdStatus::TemporarilyOffline;
-                resp.error = "Receiver unavailable";
+                resp.status = unavailableCommandStatus();
+                resp.error = unavailableCommandMessage();
             }
             return resp;
         }
@@ -427,8 +442,8 @@ public:
                 resp.status = v1::CmdStatus::Success;
                 resp.finalValue = *muted;
             } else {
-                resp.status = v1::CmdStatus::TemporarilyOffline;
-                resp.error = "Receiver unavailable";
+                resp.status = unavailableCommandStatus();
+                resp.error = unavailableCommandMessage();
             }
             return resp;
         }
@@ -456,8 +471,8 @@ public:
                 resp.status = v1::CmdStatus::Success;
                 resp.finalValue = input.toStdString();
             } else {
-                resp.status = v1::CmdStatus::TemporarilyOffline;
-                resp.error = "Receiver unavailable";
+                resp.status = unavailableCommandStatus();
+                resp.error = unavailableCommandMessage();
             }
             return resp;
         }
@@ -530,8 +545,8 @@ public:
             const QString before = m_lastInputCode;
             QString resolvedCode;
             if (!sendIscpCommand(QByteArrayLiteral("SLIQSTN"), true, 1500, true)) {
-                resp.status = v1::CmdStatus::TemporarilyOffline;
-                resp.error = "Receiver unavailable";
+                resp.status = unavailableCommandStatus();
+                resp.error = unavailableCommandMessage();
             } else if (!m_lastInputCode.isEmpty()) {
                 resp.status = v1::CmdStatus::Success;
                 resp.resultType = v1::ActionResultType::String;
@@ -892,7 +907,8 @@ private:
         m_retryIntervalMs = qBound(1000,
                                    m_meta.value(QStringLiteral("retryIntervalMs")).toInt(10000),
                                    300000);
-        m_presenceTimeoutMs = m_pollIntervalMs + 1000;
+        const int computedPresenceTimeout = qMax(m_pollIntervalMs * 3, m_retryIntervalMs + 2000);
+        m_presenceTimeoutMs = qBound(5000, computedPresenceTimeout, 900000);
         m_volumeMaxRaw = qBound(1,
                                 m_meta.value(QStringLiteral("volumeMaxRaw")).toInt(160),
                                 500);
@@ -1010,6 +1026,20 @@ private:
 
         socket.disconnectFromHost();
         return true;
+    }
+
+    v1::CmdStatus unavailableCommandStatus() const
+    {
+        const std::int64_t now = nowMs();
+        const bool recentlySeen = m_lastSeenMs > 0 && (now - m_lastSeenMs) <= m_presenceTimeoutMs;
+        return recentlySeen ? v1::CmdStatus::Failure : v1::CmdStatus::TemporarilyOffline;
+    }
+
+    v1::Utf8String unavailableCommandMessage() const
+    {
+        const std::int64_t now = nowMs();
+        const bool recentlySeen = m_lastSeenMs > 0 && (now - m_lastSeenMs) <= m_presenceTimeoutMs;
+        return recentlySeen ? v1::Utf8String("Command transport failed") : v1::Utf8String("Receiver unavailable");
     }
 
     void processResponseData(const QByteArray &data)

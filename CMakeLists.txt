@@ -57,6 +57,7 @@ if(PHI_ADAPTER_ONKYO_BUILD_IPC)
     )
 
     set_target_properties(phi_adapter_onkyo_ipc PROPERTIES
+        OUTPUT_NAME "phi_adapter_onkyo-pioneer_ipc"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins/adapters"
     )
 
