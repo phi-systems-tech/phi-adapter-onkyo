@@ -110,6 +110,50 @@ QHash<QString, QString> buildInputLabelMap()
     return map;
 }
 
+QString normalizeSliCode(QString raw)
+{
+    QString code = raw.trimmed().toUpper();
+    if (code.startsWith(QLatin1String("SLI"), Qt::CaseInsensitive))
+        code = code.mid(3).trimmed();
+    code.remove(QLatin1Char(' '));
+    if (code.isEmpty())
+        return {};
+
+    bool numeric = false;
+    const int parsed = code.toInt(&numeric, 10);
+    if (numeric) {
+        code = QString::number(parsed);
+        if (code.size() == 1)
+            code.prepend(QLatin1Char('0'));
+        return code;
+    }
+
+    if (code.size() == 1)
+        code.prepend(QLatin1Char('0'));
+    return code;
+}
+
+QJsonArray normalizeActiveSliCodesArray(const QJsonValue &value)
+{
+    QJsonArray normalized;
+    QSet<QString> seen;
+    if (!value.isArray())
+        return normalized;
+    const QJsonArray arr = value.toArray();
+    for (const QJsonValue &entry : arr) {
+        QString code;
+        if (entry.isString())
+            code = normalizeSliCode(entry.toString());
+        else if (entry.isDouble())
+            code = normalizeSliCode(QString::number(entry.toInt()));
+        if (code.isEmpty() || seen.contains(code))
+            continue;
+        seen.insert(code);
+        normalized.append(code);
+    }
+    return normalized;
+}
+
 QString inferModelFromIdentifier(const QString &raw)
 {
     QString trimmed = raw.trimmed();
@@ -281,7 +325,30 @@ public:
         AdapterSidecar::onConfigChanged(request);
         m_info = request.adapter;
         m_meta = parseJsonObject(request.adapter.metaJson);
+
+        QJsonObject normalizedPatch;
+        const QJsonValue rawActiveCodes = m_meta.value(QStringLiteral("activeSliCodes"));
+        if (rawActiveCodes.isArray()) {
+            const QJsonArray normalizedCodes = normalizeActiveSliCodesArray(rawActiveCodes);
+            if (normalizedCodes != rawActiveCodes.toArray()) {
+                m_meta.insert(QStringLiteral("activeSliCodes"), normalizedCodes);
+                normalizedPatch.insert(QStringLiteral("activeSliCodes"), normalizedCodes);
+            }
+        }
+
+        if (!normalizedPatch.isEmpty()) {
+            m_info.metaJson = toJson(m_meta);
+            v1::Utf8String err;
+            if (!sendAdapterMetaUpdated(toJson(normalizedPatch), &err))
+                std::cerr << "failed to send adapterMetaUpdated(config.normalize): " << err << '\n';
+        }
+
         applyConfig();
+        {
+            v1::Utf8String err;
+            if (!sendAdapterDescriptorUpdated(descriptor(), &err))
+                std::cerr << "failed to send adapterDescriptorUpdated(config.changed): " << err << '\n';
+        }
         m_synced = false;
         m_deviceId = resolveDeviceId();
         m_lastSeenMs = 0;
@@ -366,8 +433,8 @@ public:
         probeCurrent.id = "probeCurrentInput";
         probeCurrent.label = "Probe current";
         probeCurrent.description = "Probe current input and refresh labels.";
-        probeCurrent.hasForm = true;
-        probeCurrent.metaJson = R"({"placement":"form_field","kind":"command","requiresAck":true})";
+        probeCurrent.hasForm = false;
+        probeCurrent.metaJson = R"({"placement":"form_field","kind":"command","requiresAck":true,"reloadStaticConfig":true})";
         caps.instanceActions.push_back(probeCurrent);
 
         return caps;
@@ -450,8 +517,6 @@ public:
 
         if (request.channelExternalId == kChannelInput) {
             QString input = scalarToQString(request.value, request.valueJson).trimmed();
-            if (input.startsWith(QLatin1String("SLI"), Qt::CaseInsensitive))
-                input = input.mid(3).trimmed();
 
             const QString labelMatch = input.toLower();
             for (auto it = m_inputLabelMap.constBegin(); it != m_inputLabelMap.constEnd(); ++it) {
@@ -460,6 +525,7 @@ public:
                     break;
                 }
             }
+            input = normalizeSliCode(input);
 
             if (input.length() != 2) {
                 resp.status = v1::CmdStatus::InvalidArgument;
@@ -491,19 +557,33 @@ public:
         if (request.actionId == "probe") {
             const QJsonObject params = parseJsonObject(request.paramsJson);
             const QJsonObject factoryAdapter = resolveFactoryAdapterFromParams(params);
-            const QString host = resolveProbeHost(factoryAdapter);
+            const QStringList hosts = resolveProbeHosts(factoryAdapter);
             const std::uint16_t port = resolveProbePort(factoryAdapter);
-            if (host.isEmpty() || port == 0) {
+            if (hosts.isEmpty() || port == 0) {
                 resp.status = v1::CmdStatus::InvalidArgument;
-                resp.error = "Probe requires host/ip and port";
+                resp.error = "Probe requires host/ip and iscpPort";
                 return resp;
             }
 
             QString errorMessage;
-            if (probeEndpoint(host, port, &errorMessage)) {
+            QString successfulHost;
+            for (const QString &host : hosts) {
+                QString hostError;
+                if (probeEndpoint(host, port, &hostError)) {
+                    successfulHost = host;
+                    break;
+                }
+                if (!hostError.isEmpty()) {
+                    errorMessage = QStringLiteral("%1 (%2:%3)")
+                        .arg(hostError, host)
+                        .arg(port);
+                }
+            }
+
+            if (!successfulHost.isEmpty()) {
                 resp.status = v1::CmdStatus::Success;
                 resp.resultType = v1::ActionResultType::String;
-                resp.resultValue = QStringLiteral("%1:%2").arg(host).arg(port).toStdString();
+                resp.resultValue = QStringLiteral("%1:%2").arg(successfulHost).arg(port).toStdString();
             } else {
                 resp.status = v1::CmdStatus::Failure;
                 resp.error = errorMessage.isEmpty()
@@ -517,11 +597,36 @@ public:
         if (request.actionId == "settings") {
             const QJsonObject params = parseJsonObject(request.paramsJson);
             if (!params.isEmpty()) {
-                for (auto it = params.begin(); it != params.end(); ++it)
+                QJsonObject patch;
+                for (auto it = params.begin(); it != params.end(); ++it) {
+                    const QString key = it.key().trimmed();
+                    if (key.isEmpty())
+                        continue;
+                    if (key == QLatin1String("currentInputCode"))
+                        continue;
+
+                    if (key == QLatin1String("activeSliCodes")) {
+                        patch.insert(QStringLiteral("activeSliCodes"),
+                                     normalizeActiveSliCodesArray(it.value()));
+                        continue;
+                    }
+
+                    if (key.startsWith(QLatin1String("inputLabel_"))) {
+                        const QString code = normalizeSliCode(key.mid(11));
+                        if (code.isEmpty())
+                            continue;
+                        const QString normalizedKey = QStringLiteral("inputLabel_%1").arg(code);
+                        patch.insert(normalizedKey, it.value().toString().trimmed());
+                        continue;
+                    }
+
+                    patch.insert(key, it.value());
+                }
+
+                for (auto it = patch.begin(); it != patch.end(); ++it)
                     m_meta.insert(it.key(), it.value());
                 m_info.metaJson = toJson(m_meta);
                 applyConfig();
-                QJsonObject patch = params;
                 v1::Utf8String err;
                 if (!sendAdapterMetaUpdated(toJson(patch), &err))
                     std::cerr << "failed to send adapterMetaUpdated: " << err << '\n';
@@ -563,9 +668,7 @@ public:
             }
 
             if (!resolvedCode.isEmpty()) {
-                QString normalized = resolvedCode.trimmed();
-                if (normalized.size() == 1 && normalized[0].isDigit())
-                    normalized.prepend(QLatin1Char('0'));
+                const QString normalized = normalizeSliCode(resolvedCode);
 
                 QSet<QString> activeCodes;
                 const QJsonValue activeValue = m_meta.value(QStringLiteral("activeSliCodes"));
@@ -574,12 +677,9 @@ public:
                     for (const QJsonValue &entry : activeArray) {
                         QString code;
                         if (entry.isString()) {
-                            code = entry.toString().trimmed();
+                            code = normalizeSliCode(entry.toString());
                         } else if (entry.isDouble()) {
-                            const int numeric = entry.toInt();
-                            code = QString::number(numeric);
-                            if (code.size() == 1)
-                                code.prepend(QLatin1Char('0'));
+                            code = normalizeSliCode(QString::number(entry.toInt()));
                         }
                         if (!code.isEmpty())
                             activeCodes.insert(code);
@@ -689,51 +789,52 @@ public:
 private:
     QJsonObject resolveFactoryAdapterFromParams(const QJsonObject &params) const
     {
-        const QJsonObject factoryAdapter = params.value(QStringLiteral("factoryAdapter")).toObject();
-        if (!factoryAdapter.isEmpty())
-            return factoryAdapter;
-        return params;
+        QJsonObject effective = params.value(QStringLiteral("factoryAdapter")).toObject();
+        // Explicit dialog params must win over any nested factoryAdapter snapshot.
+        for (auto it = params.begin(); it != params.end(); ++it) {
+            if (it.key() == QLatin1String("factoryAdapter"))
+                continue;
+            effective.insert(it.key(), it.value());
+        }
+        return effective.isEmpty() ? params : effective;
     }
 
-    QString resolveProbeHost(const QJsonObject &factoryAdapter) const
+    QStringList resolveProbeHosts(const QJsonObject &factoryAdapter) const
     {
-        auto hostFromObject = [](const QJsonObject &obj) -> QString {
-            const QString ip = obj.value(QStringLiteral("ip")).toString().trimmed();
-            if (!ip.isEmpty())
-                return ip;
-            return obj.value(QStringLiteral("host")).toString().trimmed();
+        QStringList result;
+        auto appendIfMissing = [&result](const QString &value) {
+            const QString normalized = value.trimmed();
+            if (normalized.isEmpty())
+                return;
+            if (!result.contains(normalized))
+                result.push_back(normalized);
         };
 
-        QString host = hostFromObject(factoryAdapter);
-        if (!host.isEmpty())
-            return host;
+        auto appendHostsFromObject = [&appendIfMissing](const QJsonObject &obj) {
+            appendIfMissing(obj.value(QStringLiteral("host")).toString());
+            appendIfMissing(obj.value(QStringLiteral("ip")).toString());
+        };
 
-        const QJsonObject meta = factoryAdapter.value(QStringLiteral("meta")).toObject();
-        host = hostFromObject(meta);
-        if (!host.isEmpty())
-            return host;
-
-        const QStringList hostCandidates = effectiveHosts();
-        return hostCandidates.isEmpty() ? QString() : hostCandidates.front();
+        // Probe validates only current dialog values.
+        appendHostsFromObject(factoryAdapter);
+        return result;
     }
 
     std::uint16_t resolveProbePort(const QJsonObject &factoryAdapter) const
     {
         auto parsePort = [](const QJsonValue &value) -> std::uint16_t {
-            if (!value.isDouble())
-                return 0;
-            return normalizedPort(value.toInt());
+            if (value.isDouble())
+                return normalizedPort(value.toInt());
+            if (value.isString()) {
+                bool ok = false;
+                const int parsed = value.toString().trimmed().toInt(&ok, 10);
+                if (ok)
+                    return normalizedPort(parsed);
+            }
+            return 0;
         };
 
-        std::uint16_t port = parsePort(factoryAdapter.value(QStringLiteral("port")));
-        if (port == 0) {
-            const QJsonObject meta = factoryAdapter.value(QStringLiteral("meta")).toObject();
-            port = parsePort(meta.value(QStringLiteral("port")));
-        }
-
-        if (port != 0)
-            return resolvedControlPort(port);
-        return m_controlPort;
+        return parsePort(factoryAdapter.value(QStringLiteral("iscpPort")));
     }
 
     bool probeEndpoint(const QString &host, std::uint16_t port, QString *errorMessage) const
@@ -751,39 +852,50 @@ private:
 
     QJsonArray activeSliCodesFromMeta() const
     {
-        QJsonArray out;
-        const QJsonValue activeValue = m_meta.value(QStringLiteral("activeSliCodes"));
-        if (!activeValue.isArray())
-            return out;
-        const QJsonArray arr = activeValue.toArray();
-        for (const QJsonValue &entry : arr) {
-            if (entry.isString()) {
-                const QString code = entry.toString().trimmed().toUpper();
-                if (!code.isEmpty())
-                    out.append(code);
-                continue;
-            }
-            if (entry.isDouble()) {
-                QString code = QString::number(entry.toInt());
-                if (code.size() == 1)
-                    code.prepend(QLatin1Char('0'));
-                out.append(code);
-            }
-        }
-        return out;
+        return normalizeActiveSliCodesArray(m_meta.value(QStringLiteral("activeSliCodes")));
     }
 
     QJsonArray inputChoicesForSchema() const
     {
         QJsonArray choices;
-        for (auto it = m_inputLabelMap.constBegin(); it != m_inputLabelMap.constEnd(); ++it) {
+        const QStringList activeCodes = editableSliCodesForSchema();
+        for (const QString &key : activeCodes) {
             QJsonObject option;
-            option.insert(QStringLiteral("value"), it.key());
+            option.insert(QStringLiteral("value"), key);
             option.insert(QStringLiteral("label"),
-                          it.value().isEmpty()
-                              ? QStringLiteral("SLI %1").arg(it.key())
-                              : it.value());
+                          m_inputLabelMap.value(key).isEmpty()
+                              ? QStringLiteral("SLI %1").arg(key)
+                              : m_inputLabelMap.value(key));
             choices.append(option);
+        }
+        return choices;
+    }
+
+    QStringList editableSliCodesForSchema() const
+    {
+        QSet<QString> codeSet;
+        const QJsonArray activeCodes = activeSliCodesFromMeta();
+        for (const QJsonValue &entry : activeCodes)
+            codeSet.insert(normalizeSliCode(entry.toString()));
+
+        codeSet.remove(QString());
+        QStringList out = codeSet.values();
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+
+    v1::AdapterConfigOptionList inputChoicesForChannel() const
+    {
+        v1::AdapterConfigOptionList choices;
+        QStringList keys = m_inputLabelMap.keys();
+        std::sort(keys.begin(), keys.end());
+        choices.reserve(static_cast<std::size_t>(keys.size()));
+        for (const QString &key : keys) {
+            v1::AdapterConfigOption option;
+            option.value = key.toStdString();
+            const QString label = m_inputLabelMap.value(key).trimmed();
+            option.label = (label.isEmpty() ? QStringLiteral("SLI %1").arg(key) : label).toStdString();
+            choices.push_back(std::move(option));
         }
         return choices;
     }
@@ -799,7 +911,8 @@ private:
                         QString parentActionId = QString(),
                         QJsonArray flags = QJsonArray(),
                         QJsonValue choices = QJsonValue(),
-                        QJsonObject meta = QJsonObject()) {
+                        QJsonObject meta = QJsonObject(),
+                        QJsonObject layout = QJsonObject()) {
             QJsonObject obj;
             obj.insert(QStringLiteral("key"), key);
             obj.insert(QStringLiteral("type"), type);
@@ -816,6 +929,22 @@ private:
                 obj.insert(QStringLiteral("flags"), flags);
             if (choices.isArray())
                 obj.insert(QStringLiteral("choices"), choices);
+            if (!meta.isEmpty())
+                obj.insert(QStringLiteral("meta"), meta);
+            if (!layout.isEmpty())
+                obj.insert(QStringLiteral("layout"), layout);
+            return obj;
+        };
+        auto action = [](QString id,
+                         QString label,
+                         QString description,
+                         bool hasForm,
+                         QJsonObject meta = QJsonObject()) {
+            QJsonObject obj;
+            obj.insert(QStringLiteral("id"), id);
+            obj.insert(QStringLiteral("label"), label);
+            obj.insert(QStringLiteral("description"), description);
+            obj.insert(QStringLiteral("hasForm"), hasForm);
             if (!meta.isEmpty())
                 obj.insert(QStringLiteral("meta"), meta);
             return obj;
@@ -835,10 +964,14 @@ private:
                                        QStringLiteral("Hostname"),
                                        QStringLiteral("Host")));
         }
-        const int defaultPort = (m_info.port > 0 && m_info.port != 80)
-            ? static_cast<int>(m_info.port)
-            : 60128;
-        factoryFields.append(field(QStringLiteral("port"),
+        const int configuredIscpPort = static_cast<int>(
+            normalizedPort(m_meta.value(QStringLiteral("iscpPort")).toInt(0)));
+        const int defaultPort = (configuredIscpPort > 0)
+            ? configuredIscpPort
+            : ((m_info.port > 0 && m_info.port != 80)
+                   ? static_cast<int>(m_info.port)
+                   : 60128);
+        factoryFields.append(field(QStringLiteral("iscpPort"),
                                    QStringLiteral("Port"),
                                    QStringLiteral("ISCP Port"),
                                    defaultPort));
@@ -868,7 +1001,8 @@ private:
                                     QString(),
                                     QStringLiteral("settings"),
                                     QJsonArray{QStringLiteral("Multi"), QStringLiteral("InstanceOnly")},
-                                    inputChoicesForSchema()));
+                                    inputChoicesForSchema(),
+                                    QJsonObject{{QStringLiteral("reloadActionLayoutOnChange"), true}}));
         instanceFields.append(field(QStringLiteral("currentInputCode"),
                                     QStringLiteral("String"),
                                     QStringLiteral("Current input (SLI)"),
@@ -882,15 +1016,79 @@ private:
                                         QStringLiteral("InstanceOnly"),
                                     },
                                     QJsonValue(),
-                                    QJsonObject{{QStringLiteral("appendTo"), QStringLiteral("activeSliCodes")}}));
+                                    QJsonObject{
+                                        {QStringLiteral("appendTo"), QStringLiteral("activeSliCodes")},
+                                        {QStringLiteral("reloadStaticConfig"), true},
+                                    },
+                                    QJsonObject{{QStringLiteral("actionPosition"), QStringLiteral("inline")}}));
+
+        const QStringList editableCodes = editableSliCodesForSchema();
+        for (const QString &code : editableCodes) {
+            const QString key = QStringLiteral("inputLabel_%1").arg(code);
+            QString labelValue = m_meta.value(key).toString().trimmed();
+            if (labelValue.isEmpty())
+                labelValue = m_inputLabelMap.value(code).trimmed();
+            if (labelValue.isEmpty())
+                labelValue = QStringLiteral("SLI %1").arg(code);
+
+            QJsonObject mappingField = field(key,
+                                             QStringLiteral("String"),
+                                             QStringLiteral("SLI %1 label").arg(code),
+                                             labelValue,
+                                             QString(),
+                                             QString(),
+                                             QStringLiteral("settings"),
+                                             QJsonArray{QStringLiteral("InstanceOnly")});
+            mappingField.insert(QStringLiteral("visibility"),
+                                QJsonObject{
+                                    {QStringLiteral("fieldKey"), QStringLiteral("activeSliCodes")},
+                                    {QStringLiteral("op"), QStringLiteral("contains")},
+                                    {QStringLiteral("value"), code},
+                                });
+            instanceFields.append(mappingField);
+        }
 
         QJsonObject factorySection;
         factorySection.insert(QStringLiteral("title"), QStringLiteral("Connection"));
         factorySection.insert(QStringLiteral("fields"), factoryFields);
+        factorySection.insert(QStringLiteral("actions"),
+                              QJsonArray{
+                                  action(QStringLiteral("probe"),
+                                         QStringLiteral("Test connection"),
+                                         QStringLiteral("Validate receiver reachability using the current config values."),
+                                         false,
+                                         QJsonObject{
+                                             {QStringLiteral("placement"), QStringLiteral("card")},
+                                             {QStringLiteral("kind"), QStringLiteral("command")},
+                                             {QStringLiteral("requiresAck"), true},
+                                         }),
+                              });
 
         QJsonObject instanceSection;
         instanceSection.insert(QStringLiteral("title"), QStringLiteral("Settings"));
         instanceSection.insert(QStringLiteral("fields"), instanceFields);
+        instanceSection.insert(QStringLiteral("actions"),
+                               QJsonArray{
+                                   action(QStringLiteral("settings"),
+                                          QStringLiteral("Settings"),
+                                          QStringLiteral("Update adapter settings."),
+                                          true,
+                                          QJsonObject{
+                                              {QStringLiteral("placement"), QStringLiteral("card")},
+                                              {QStringLiteral("kind"), QStringLiteral("open_dialog")},
+                                              {QStringLiteral("requiresAck"), true},
+                                          }),
+                                   action(QStringLiteral("probeCurrentInput"),
+                                          QStringLiteral("Probe current"),
+                                          QStringLiteral("Probe current input and refresh labels."),
+                                          false,
+                                          QJsonObject{
+                                              {QStringLiteral("placement"), QStringLiteral("form_field")},
+                                              {QStringLiteral("kind"), QStringLiteral("command")},
+                                              {QStringLiteral("requiresAck"), true},
+                                              {QStringLiteral("reloadStaticConfig"), true},
+                                          }),
+                               });
 
         QJsonObject schema;
         schema.insert(QStringLiteral("factory"), factorySection);
@@ -900,7 +1098,8 @@ private:
 
     void applyConfig()
     {
-        m_controlPort = resolvedControlPort(m_info.port);
+        const int configuredIscpPort = m_meta.value(QStringLiteral("iscpPort")).toInt(0);
+        m_controlPort = resolvedControlPort(normalizedPort(configuredIscpPort));
         m_pollIntervalMs = qBound(500,
                                   m_meta.value(QStringLiteral("pollIntervalMs")).toInt(5000),
                                   300000);
@@ -1233,6 +1432,7 @@ private:
         input.kind = v1::ChannelKind::HdmiInput;
         input.dataType = v1::ChannelDataType::String;
         input.flags = v1::ChannelFlag::Readable | v1::ChannelFlag::Writable | v1::ChannelFlag::Reportable;
+        input.choices = inputChoicesForChannel();
         channels.push_back(input);
 
         v1::Channel connectivity;
@@ -1262,6 +1462,7 @@ private:
         input.kind = v1::ChannelKind::HdmiInput;
         input.dataType = v1::ChannelDataType::String;
         input.flags = v1::ChannelFlag::Readable | v1::ChannelFlag::Writable | v1::ChannelFlag::Reportable;
+        input.choices = inputChoicesForChannel();
         return input;
     }
 
@@ -1307,45 +1508,36 @@ private:
     {
         m_inputLabelMap = buildInputLabelMap();
 
-        QSet<QString> activeCodeSet;
         const QJsonValue activeCodesValue = m_meta.value(QStringLiteral("activeSliCodes"));
         if (activeCodesValue.isArray()) {
-            QHash<QString, QString> filtered;
             const QJsonArray activeCodes = activeCodesValue.toArray();
             for (const QJsonValue &entry : activeCodes) {
                 QString code;
                 if (entry.isString()) {
-                    code = entry.toString().trimmed();
+                    code = normalizeSliCode(entry.toString());
                 } else if (entry.isDouble()) {
-                    const int numeric = entry.toInt();
-                    code = QString::number(numeric);
-                    if (code.size() == 1)
-                        code.prepend(QLatin1Char('0'));
+                    code = normalizeSliCode(QString::number(entry.toInt()));
                 }
                 if (code.isEmpty())
                     continue;
-                activeCodeSet.insert(code);
                 QString label = m_inputLabelMap.value(code);
                 if (label.isEmpty())
                     label = QStringLiteral("SLI %1").arg(code);
-                filtered.insert(code, label);
+                m_inputLabelMap.insert(code, label);
             }
-            if (!filtered.isEmpty())
-                m_inputLabelMap = filtered;
         }
 
         for (auto it = m_meta.begin(); it != m_meta.end(); ++it) {
             const QString key = it.key();
             if (!key.startsWith(QLatin1String("inputLabel_")))
                 continue;
-            const QString code = key.mid(11).trimmed();
+            const QString code = normalizeSliCode(key.mid(11));
             if (code.isEmpty())
                 continue;
             QString label = it.value().toString().trimmed();
             if (label.isEmpty())
                 label = QStringLiteral("SLI %1").arg(code);
-            if (activeCodeSet.isEmpty() || activeCodeSet.contains(code))
-                m_inputLabelMap.insert(code, label);
+            m_inputLabelMap.insert(code, label);
         }
     }
 
