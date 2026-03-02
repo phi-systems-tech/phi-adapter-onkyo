@@ -32,7 +32,7 @@ namespace sdk = phicore::adapter::sdk;
 
 namespace {
 
-constexpr const char kPluginType[] = "onkyo-pioneer";
+constexpr const char kPluginType[] = "onkyo";
 constexpr const char kChannelPower[] = "power";
 constexpr const char kChannelVolume[] = "volume";
 constexpr const char kChannelMute[] = "mute";
@@ -212,12 +212,7 @@ std::uint16_t normalizedPort(int value)
 std::uint16_t resolvedControlPort(std::uint16_t adapterPortValue)
 {
     const std::uint16_t adapterPort = normalizedPort(static_cast<int>(adapterPortValue));
-
-    // _sues* discovery often resolves to port 80 (web UI), not ISCP.
-    if (adapterPort == 0 || adapterPort == 80)
-        return 60128;
-
-    return adapterPort;
+    return adapterPort == 0 ? static_cast<std::uint16_t>(60128) : adapterPort;
 }
 
 std::optional<double> scalarToDouble(const v1::ScalarValue &value)
@@ -255,7 +250,7 @@ std::optional<bool> scalarToBool(const v1::ScalarValue &value)
     return std::nullopt;
 }
 
-QString scalarToQString(const v1::ScalarValue &value, const std::string &fallbackJson)
+QString scalarToQString(const v1::ScalarValue &value)
 {
     if (const auto *v = std::get_if<v1::Utf8String>(&value))
         return QString::fromStdString(*v);
@@ -265,21 +260,6 @@ QString scalarToQString(const v1::ScalarValue &value, const std::string &fallbac
         return QString::number(*v, 'g', 12);
     if (const auto *v = std::get_if<bool>(&value))
         return *v ? QStringLiteral("1") : QStringLiteral("0");
-
-    if (!fallbackJson.empty()) {
-        QJsonParseError err{};
-        const QJsonDocument wrapper =
-            QJsonDocument::fromJson(QByteArray::fromStdString("{\"v\":" + fallbackJson + "}"), &err);
-        if (err.error == QJsonParseError::NoError && wrapper.isObject()) {
-            const QJsonValue v = wrapper.object().value(QStringLiteral("v"));
-            if (v.isString())
-                return v.toString();
-            if (v.isDouble())
-                return QString::number(v.toDouble(), 'g', 12);
-            if (v.isBool())
-                return v.toBool() ? QStringLiteral("1") : QStringLiteral("0");
-        }
-    }
     return {};
 }
 
@@ -516,7 +496,7 @@ public:
         }
 
         if (request.channelExternalId == kChannelInput) {
-            QString input = scalarToQString(request.value, request.valueJson).trimmed();
+            QString input = scalarToQString(request.value).trimmed();
 
             const QString labelMatch = input.toLower();
             for (auto it = m_inputLabelMap.constBegin(); it != m_inputLabelMap.constEnd(); ++it) {
@@ -556,9 +536,8 @@ public:
 
         if (request.actionId == "probe") {
             const QJsonObject params = parseJsonObject(request.paramsJson);
-            const QJsonObject factoryAdapter = resolveFactoryAdapterFromParams(params);
-            const QStringList hosts = resolveProbeHosts(factoryAdapter);
-            const std::uint16_t port = resolveProbePort(factoryAdapter);
+            const QStringList hosts = resolveProbeHosts(params);
+            const std::uint16_t port = resolveProbePort(params);
             if (hosts.isEmpty() || port == 0) {
                 resp.status = v1::CmdStatus::InvalidArgument;
                 resp.error = "Probe requires host/ip and iscpPort";
@@ -787,19 +766,7 @@ public:
     }
 
 private:
-    QJsonObject resolveFactoryAdapterFromParams(const QJsonObject &params) const
-    {
-        QJsonObject effective = params.value(QStringLiteral("factoryAdapter")).toObject();
-        // Explicit dialog params must win over any nested factoryAdapter snapshot.
-        for (auto it = params.begin(); it != params.end(); ++it) {
-            if (it.key() == QLatin1String("factoryAdapter"))
-                continue;
-            effective.insert(it.key(), it.value());
-        }
-        return effective.isEmpty() ? params : effective;
-    }
-
-    QStringList resolveProbeHosts(const QJsonObject &factoryAdapter) const
+    QStringList resolveProbeHosts(const QJsonObject &params) const
     {
         QStringList result;
         auto appendIfMissing = [&result](const QString &value) {
@@ -815,12 +782,11 @@ private:
             appendIfMissing(obj.value(QStringLiteral("ip")).toString());
         };
 
-        // Probe validates only current dialog values.
-        appendHostsFromObject(factoryAdapter);
+        appendHostsFromObject(params);
         return result;
     }
 
-    std::uint16_t resolveProbePort(const QJsonObject &factoryAdapter) const
+    std::uint16_t resolveProbePort(const QJsonObject &params) const
     {
         auto parsePort = [](const QJsonValue &value) -> std::uint16_t {
             if (value.isDouble())
@@ -834,7 +800,7 @@ private:
             return 0;
         };
 
-        return parsePort(factoryAdapter.value(QStringLiteral("iscpPort")));
+        return parsePort(params.value(QStringLiteral("iscpPort")));
     }
 
     bool probeEndpoint(const QString &host, std::uint16_t port, QString *errorMessage) const
@@ -968,9 +934,7 @@ private:
             normalizedPort(m_meta.value(QStringLiteral("iscpPort")).toInt(0)));
         const int defaultPort = (configuredIscpPort > 0)
             ? configuredIscpPort
-            : ((m_info.port > 0 && m_info.port != 80)
-                   ? static_cast<int>(m_info.port)
-                   : 60128);
+            : (m_info.port > 0 ? static_cast<int>(m_info.port) : 60128);
         factoryFields.append(field(QStringLiteral("iscpPort"),
                                    QStringLiteral("Port"),
                                    QStringLiteral("ISCP Port"),
@@ -1378,7 +1342,6 @@ private:
             const QStringList candidates = {
                 host,
                 m_meta.value(QStringLiteral("deviceUuid")).toString(),
-                m_meta.value(QStringLiteral("uuid")).toString(),
                 m_meta.value(QStringLiteral("deviceName")).toString(),
                 QString::fromStdString(m_info.name),
             };
@@ -1471,10 +1434,6 @@ private:
         const QString uuid = m_meta.value(QStringLiteral("deviceUuid")).toString().trimmed();
         if (!uuid.isEmpty())
             return uuid.toStdString();
-
-        const QString legacyUuid = m_meta.value(QStringLiteral("uuid")).toString().trimmed();
-        if (!legacyUuid.isEmpty())
-            return legacyUuid.toStdString();
 
         if (!m_info.externalId.empty())
             return m_info.externalId;

@@ -54,7 +54,7 @@ Provides local network command/control integration for Onkyo/Pioneer receivers.
 - Device settings are configured through phi-core
 - Factory scope fields:
   - `host`
-  - `port` (ISCP port, typically `60128`)
+  - `iscpPort` (ISCP port, typically `60128`)
   - `pollIntervalMs`
   - `retryIntervalMs`
 - Instance scope fields:
@@ -80,7 +80,13 @@ cmake --build build --parallel
 - Cause: wrong endpoint or network reachability issues
 - Fix: validate host/port and connectivity from phi-core host
 - Symptom: discovery resolves to HTTP port (`80`) instead of ISCP
-- Fix: set `port` explicitly in adapter config (for example `60128`)
+- Fix: set `iscpPort` explicitly in adapter config (for example `60128`)
+
+### v1 Contract Notes
+
+- Factory action `probe` reads only explicit action/form params (`host`, `ip`, `iscpPort`).
+- No legacy nested `factoryAdapter` parameter fallback is used.
+- Runtime device identity uses `deviceUuid` / adapter `externalId`; legacy `uuid` fallback is not used.
 
 ### Maintainers
 

@@ -1,0 +1,22 @@
+{
+  "discovery": [
+    {
+      "kind": "mdns",
+      "mdnsServiceType": "_sues800device._tcp",
+      "defaultPort": 60128,
+      "hints": {
+        "portOverride": 60128,
+        "portOverrideOnlyIfDiscoveredPortIn": [80]
+      }
+    },
+    {
+      "kind": "mdns",
+      "mdnsServiceType": "_suegrouping._tcp",
+      "defaultPort": 60128,
+      "hints": {
+        "portOverride": 60128,
+        "portOverrideOnlyIfDiscoveredPortIn": [80]
+      }
+    }
+  ]
+}

@@ -57,11 +57,16 @@ if(PHI_ADAPTER_ONKYO_BUILD_IPC)
     )
 
     set_target_properties(phi_adapter_onkyo_ipc PROPERTIES
-        OUTPUT_NAME "phi_adapter_onkyo-pioneer_ipc"
+        OUTPUT_NAME "phi_adapter_onkyo_ipc"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins/adapters"
     )
 
     install(TARGETS phi_adapter_onkyo_ipc
         RUNTIME DESTINATION lib/phi/plugins/adapters
+    )
+
+    install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/onkyo-config.json"
+        DESTINATION lib/phi/plugins/adapters
+        RENAME onkyo-config.json
     )
 endif()
