@@ -42,6 +42,9 @@ if(PHI_ADAPTER_ONKYO_BUILD_IPC)
     if(NOT TARGET phi::adapter-sdk)
         message(FATAL_ERROR "phi-adapter-sdk target phi::adapter-sdk not found")
     endif()
+    if(NOT TARGET phi::adapter-sdk-qt)
+        message(FATAL_ERROR "phi-adapter-sdk target phi::adapter-sdk-qt not found")
+    endif()
 
     add_executable(phi_adapter_onkyo_ipc
         src/onkyoipcmain.cpp
@@ -53,7 +56,7 @@ if(PHI_ADAPTER_ONKYO_BUILD_IPC)
         PRIVATE
             Qt6::Core
             Qt6::Network
-            phi::adapter-sdk
+            phi::adapter-sdk-qt
     )
 
     set_target_properties(phi_adapter_onkyo_ipc PROPERTIES

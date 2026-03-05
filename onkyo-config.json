@@ -18,5 +18,32 @@
         "portOverrideOnlyIfDiscoveredPortIn": [80]
       }
     }
-  ]
+  ],
+  "sliLabels": {
+    "00": "Video 1",
+    "01": "Video 2",
+    "02": "GAME",
+    "03": "AUX",
+    "04": "Video 5",
+    "05": "Video 6",
+    "06": "Video 7",
+    "10": "DVD",
+    "12": "TV",
+    "20": "TV",
+    "21": "TV/CD",
+    "22": "Cable/Sat",
+    "23": "HDMI 1",
+    "24": "HDMI 2",
+    "25": "HDMI 3",
+    "26": "HDMI 4",
+    "2E": "BT Audio",
+    "30": "CD",
+    "31": "FM",
+    "32": "AM",
+    "40": "USB",
+    "41": "Network",
+    "44": "Bluetooth",
+    "80": "USB Front",
+    "81": "USB Rear"
+  }
 }

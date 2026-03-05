@@ -1,7 +1,9 @@
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
+#include <deque>
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -14,18 +16,20 @@
 #include <QAbstractSocket>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
-#include <QMap>
 #include <QRegularExpression>
 #include <QSet>
 #include <QStringList>
 #include <QTcpSocket>
+#include <QTimer>
 #include <QtGlobal>
 
 #include "phi/adapter/sdk/sidecar.h"
+#include "phi/adapter/sdk/qt/instance_execution_backend_qt.h"
 
 namespace v1 = phicore::adapter::v1;
 namespace sdk = phicore::adapter::sdk;
@@ -50,6 +54,9 @@ constexpr const char kOnkyoIconSvg[] =
 
 constexpr bool kUseEiscp = true;
 constexpr bool kUseCrlf = false;
+constexpr bool kTraceEnabled = false;
+constexpr int kPollQueryTimeoutMs = 500;
+constexpr int kConnectFailuresBeforeDisconnect = 2;
 
 std::atomic_bool g_running{true};
 
@@ -61,6 +68,13 @@ void handleSignal(int)
 std::int64_t nowMs()
 {
     return QDateTime::currentMSecsSinceEpoch();
+}
+
+void trace(const QString &message)
+{
+    if (!kTraceEnabled)
+        return;
+    std::cerr << "[" << nowMs() << "] onkyo-ipc: " << message.toStdString() << '\n';
 }
 
 std::string toJson(const QJsonObject &obj)
@@ -79,34 +93,21 @@ QJsonObject parseJsonObject(const std::string &text)
     return doc.object();
 }
 
-QHash<QString, QString> buildInputLabelMap()
+QString normalizeSliCode(QString raw);
+
+QHash<QString, QString> loadConfiguredSliLabels(const QJsonObject &staticConfig)
 {
     QHash<QString, QString> map;
-    map.insert(QStringLiteral("00"), QStringLiteral("Video 1"));
-    map.insert(QStringLiteral("01"), QStringLiteral("Video 2"));
-    map.insert(QStringLiteral("02"), QStringLiteral("GAME"));
-    map.insert(QStringLiteral("03"), QStringLiteral("AUX"));
-    map.insert(QStringLiteral("04"), QStringLiteral("Video 5"));
-    map.insert(QStringLiteral("05"), QStringLiteral("Video 6"));
-    map.insert(QStringLiteral("06"), QStringLiteral("Video 7"));
-    map.insert(QStringLiteral("10"), QStringLiteral("BD/DVD"));
-    map.insert(QStringLiteral("12"), QStringLiteral("TV"));
-    map.insert(QStringLiteral("20"), QStringLiteral("TV"));
-    map.insert(QStringLiteral("21"), QStringLiteral("TV/CD"));
-    map.insert(QStringLiteral("22"), QStringLiteral("Cable/Sat"));
-    map.insert(QStringLiteral("23"), QStringLiteral("HDMI 1"));
-    map.insert(QStringLiteral("24"), QStringLiteral("HDMI 2"));
-    map.insert(QStringLiteral("25"), QStringLiteral("HDMI 3"));
-    map.insert(QStringLiteral("26"), QStringLiteral("HDMI 4"));
-    map.insert(QStringLiteral("30"), QStringLiteral("CD"));
-    map.insert(QStringLiteral("31"), QStringLiteral("FM"));
-    map.insert(QStringLiteral("32"), QStringLiteral("AM"));
-    map.insert(QStringLiteral("40"), QStringLiteral("USB"));
-    map.insert(QStringLiteral("41"), QStringLiteral("Network"));
-    map.insert(QStringLiteral("44"), QStringLiteral("Bluetooth"));
-    map.insert(QStringLiteral("2E"), QStringLiteral("BT Audio"));
-    map.insert(QStringLiteral("80"), QStringLiteral("USB Front"));
-    map.insert(QStringLiteral("81"), QStringLiteral("USB Rear"));
+    QJsonObject labels = staticConfig.value(QStringLiteral("sliLabels")).toObject();
+    for (auto it = labels.begin(); it != labels.end(); ++it) {
+        const QString code = normalizeSliCode(it.key());
+        if (code.isEmpty())
+            continue;
+        const QString label = it.value().toString().trimmed();
+        if (label.isEmpty())
+            continue;
+        map.insert(code, label);
+    }
     return map;
 }
 
@@ -133,24 +134,51 @@ QString normalizeSliCode(QString raw)
     return code;
 }
 
+QString formatSliDisplayLabel(const QString &code, const QString &mappedLabel)
+{
+    const QString normalizedCode = normalizeSliCode(code);
+    if (normalizedCode.isEmpty())
+        return mappedLabel.trimmed();
+    const QString label = mappedLabel.trimmed();
+    if (label.isEmpty())
+        return QStringLiteral("SLI %1").arg(normalizedCode);
+    if (label.startsWith(QLatin1String("SLI"), Qt::CaseInsensitive))
+        return label;
+    return QStringLiteral("SLI %1 - %2").arg(normalizedCode, label);
+}
+
 QJsonArray normalizeActiveSliCodesArray(const QJsonValue &value)
 {
     QJsonArray normalized;
     QSet<QString> seen;
-    if (!value.isArray())
-        return normalized;
-    const QJsonArray arr = value.toArray();
-    for (const QJsonValue &entry : arr) {
-        QString code;
-        if (entry.isString())
-            code = normalizeSliCode(entry.toString());
-        else if (entry.isDouble())
-            code = normalizeSliCode(QString::number(entry.toInt()));
+    auto appendCode = [&normalized, &seen](const QString &rawCode) {
+        const QString code = normalizeSliCode(rawCode);
         if (code.isEmpty() || seen.contains(code))
-            continue;
+            return;
         seen.insert(code);
         normalized.append(code);
+    };
+
+    if (value.isArray()) {
+        const QJsonArray arr = value.toArray();
+        for (const QJsonValue &entry : arr) {
+            if (entry.isString()) {
+                appendCode(entry.toString());
+                continue;
+            }
+            if (entry.isDouble()) {
+                appendCode(QString::number(entry.toInt()));
+                continue;
+            }
+        }
+        return normalized;
     }
+
+    if (value.isString())
+        appendCode(value.toString());
+    else if (value.isDouble())
+        appendCode(QString::number(value.toInt()));
+
     return normalized;
 }
 
@@ -263,54 +291,355 @@ QString scalarToQString(const v1::ScalarValue &value)
     return {};
 }
 
-v1::ScalarValue qVariantToScalarValue(const QVariant &value)
+QStringList resolveProbeHosts(const QJsonObject &params)
 {
-    if (!value.isValid() || value.isNull())
-        return std::monostate{};
+    QStringList ips;
+    QStringList hosts;
+    auto appendIfMissing = [&ips, &hosts](const QString &value) {
+        const QString normalized = value.trimmed();
+        if (normalized.isEmpty())
+            return;
+        QHostAddress addr;
+        if (addr.setAddress(normalized)) {
+            if (!ips.contains(normalized))
+                ips.push_back(normalized);
+            return;
+        }
+        if (!hosts.contains(normalized))
+            hosts.push_back(normalized);
+    };
 
-    switch (value.typeId()) {
-    case QMetaType::Bool:
-        return value.toBool();
-    case QMetaType::Int:
-    case QMetaType::UInt:
-    case QMetaType::LongLong:
-    case QMetaType::ULongLong:
-        return static_cast<std::int64_t>(value.toLongLong());
-    case QMetaType::Double:
-    case QMetaType::Float:
-        return value.toDouble();
-    default:
-        return value.toString().toStdString();
+    appendIfMissing(params.value(QStringLiteral("ip")).toString());
+    const QJsonObject adapterObj = params.value(QStringLiteral("adapter")).toObject();
+    if (!adapterObj.isEmpty())
+        appendIfMissing(adapterObj.value(QStringLiteral("ip")).toString());
+    appendIfMissing(params.value(QStringLiteral("host")).toString());
+    if (!adapterObj.isEmpty())
+        appendIfMissing(adapterObj.value(QStringLiteral("host")).toString());
+    QStringList result = ips;
+    for (const QString &host : std::as_const(hosts)) {
+        if (!result.contains(host))
+            result.push_back(host);
     }
+    return result;
 }
 
-class OnkyoIpcSidecar final : public sdk::AdapterSidecar
+std::uint16_t resolveProbePort(const QJsonObject &params)
+{
+    auto parsePort = [](const QJsonValue &value) -> std::uint16_t {
+        if (value.isDouble())
+            return normalizedPort(value.toInt());
+        if (value.isString()) {
+            bool ok = false;
+            const int parsed = value.toString().trimmed().toInt(&ok, 10);
+            if (ok)
+                return normalizedPort(parsed);
+        }
+        return 0;
+    };
+
+    return parsePort(params.value(QStringLiteral("iscpPort")));
+}
+
+bool probeEndpoint(const QString &host, std::uint16_t port, QString *errorMessage)
+{
+    QElapsedTimer timer;
+    timer.start();
+    trace(QStringLiteral("factory probe start host=%1 port=%2").arg(host).arg(port));
+    QTcpSocket socket;
+    socket.connectToHost(host, port);
+    if (!socket.waitForConnected(900)) {
+        trace(QStringLiteral("factory probe failed host=%1 port=%2 elapsedMs=%3 error=%4")
+                  .arg(host)
+                  .arg(port)
+                  .arg(timer.elapsed())
+                  .arg(socket.errorString()));
+        if (errorMessage)
+            *errorMessage = socket.errorString();
+        return false;
+    }
+    trace(QStringLiteral("factory probe ok host=%1 port=%2 elapsedMs=%3")
+              .arg(host)
+              .arg(port)
+              .arg(timer.elapsed()));
+    socket.disconnectFromHost();
+    return true;
+}
+
+QJsonArray optionsToChoiceJson(const v1::AdapterConfigOptionList &options)
+{
+    QJsonArray out;
+    for (const v1::AdapterConfigOption &option : options) {
+        QJsonObject choice;
+        choice.insert(QStringLiteral("value"), QString::fromStdString(option.value));
+        choice.insert(QStringLiteral("label"), QString::fromStdString(option.label));
+        out.append(choice);
+    }
+    return out;
+}
+
+QJsonArray schemaInputChoices(const QHash<QString, QString> &labels)
+{
+    QJsonArray choices;
+    for (int code = 0; code <= 0xFF; ++code) {
+        const QString key = QStringLiteral("%1").arg(code, 2, 16, QLatin1Char('0')).toUpper();
+        const QString label = formatSliDisplayLabel(key, labels.value(key));
+        QJsonObject option;
+        option.insert(QStringLiteral("value"), key);
+        option.insert(QStringLiteral("label"), label);
+        choices.append(option);
+    }
+    return choices;
+}
+
+QJsonObject buildConfigSchemaObject(const QHash<QString, QString> &labels)
+{
+    auto field = [](QString key,
+                    QString type,
+                    QString label,
+                    QJsonValue defaultValue = QJsonValue(),
+                    QString actionId = QString(),
+                    QString actionLabel = QString(),
+                    QString parentActionId = QString(),
+                    QJsonArray flags = QJsonArray(),
+                    QJsonValue choices = QJsonValue(),
+                    QJsonObject meta = QJsonObject(),
+                    QJsonObject layout = QJsonObject()) {
+        QJsonObject obj;
+        obj.insert(QStringLiteral("key"), key);
+        obj.insert(QStringLiteral("type"), type);
+        obj.insert(QStringLiteral("label"), label);
+        if (!defaultValue.isUndefined() && !defaultValue.isNull())
+            obj.insert(QStringLiteral("default"), defaultValue);
+        if (!actionId.isEmpty())
+            obj.insert(QStringLiteral("actionId"), actionId);
+        if (!actionLabel.isEmpty())
+            obj.insert(QStringLiteral("actionLabel"), actionLabel);
+        if (!parentActionId.isEmpty())
+            obj.insert(QStringLiteral("parentActionId"), parentActionId);
+        if (!flags.isEmpty())
+            obj.insert(QStringLiteral("flags"), flags);
+        if (choices.isArray())
+            obj.insert(QStringLiteral("choices"), choices);
+        if (!meta.isEmpty())
+            obj.insert(QStringLiteral("meta"), meta);
+        if (!layout.isEmpty())
+            obj.insert(QStringLiteral("layout"), layout);
+        return obj;
+    };
+    auto action = [](QString id,
+                     QString label,
+                     QString description,
+                     bool hasForm,
+                     QJsonObject meta = QJsonObject()) {
+        QJsonObject obj;
+        obj.insert(QStringLiteral("id"), id);
+        obj.insert(QStringLiteral("label"), label);
+        obj.insert(QStringLiteral("description"), description);
+        obj.insert(QStringLiteral("hasForm"), hasForm);
+        if (!meta.isEmpty())
+            obj.insert(QStringLiteral("meta"), meta);
+        return obj;
+    };
+
+    QJsonArray factoryFields;
+    factoryFields.append(field(QStringLiteral("host"), QStringLiteral("Hostname"), QStringLiteral("Host")));
+    factoryFields.append(field(QStringLiteral("iscpPort"),
+                               QStringLiteral("Port"),
+                               QStringLiteral("ISCP Port"),
+                               60128));
+    factoryFields.append(field(QStringLiteral("pollIntervalMs"),
+                               QStringLiteral("Integer"),
+                               QStringLiteral("Poll interval"),
+                               5000));
+    factoryFields.append(field(QStringLiteral("retryIntervalMs"),
+                               QStringLiteral("Integer"),
+                               QStringLiteral("Retry interval"),
+                               10000));
+
+    const QJsonArray inputChoices = schemaInputChoices(labels);
+
+    QJsonArray instanceFields;
+    instanceFields.append(field(QStringLiteral("volumeMaxRaw"),
+                                QStringLiteral("Integer"),
+                                QStringLiteral("Max volume raw"),
+                                160,
+                                QString(),
+                                QString(),
+                                QStringLiteral("settings"),
+                                QJsonArray{QStringLiteral("InstanceOnly")}));
+    instanceFields.append(field(QStringLiteral("activeSliCodes"),
+                                QStringLiteral("Select"),
+                                QStringLiteral("Active SLI codes"),
+                                QJsonArray(),
+                                QString(),
+                                QString(),
+                                QStringLiteral("settings"),
+                                QJsonArray{QStringLiteral("Multi"), QStringLiteral("InstanceOnly")},
+                                inputChoices,
+                                QJsonObject{{QStringLiteral("reloadActionLayoutOnChange"), true}}));
+    instanceFields.append(field(QStringLiteral("currentInputCode"),
+                                QStringLiteral("String"),
+                                QStringLiteral("Current input (SLI)"),
+                                QJsonValue(),
+                                QStringLiteral("probeCurrentInput"),
+                                QStringLiteral("Probe current"),
+                                QStringLiteral("settings"),
+                                QJsonArray{
+                                    QStringLiteral("ReadOnly"),
+                                    QStringLiteral("Transient"),
+                                    QStringLiteral("InstanceOnly"),
+                                },
+                                QJsonValue(),
+                                QJsonObject{
+                                    {QStringLiteral("appendTo"), QStringLiteral("activeSliCodes")},
+                                },
+                                QJsonObject{{QStringLiteral("actionPosition"), QStringLiteral("inline")}}));
+
+    for (const QJsonValue &choiceValue : inputChoices) {
+        if (!choiceValue.isObject())
+            continue;
+        const QJsonObject choiceObj = choiceValue.toObject();
+        const QString key = normalizeSliCode(choiceObj.value(QStringLiteral("value")).toString());
+        if (key.isEmpty())
+            continue;
+        QJsonObject mappingField = field(QStringLiteral("inputLabel_%1").arg(key),
+                                         QStringLiteral("String"),
+                                         QStringLiteral("SLI %1 label").arg(key),
+                                         labels.value(key),
+                                         QString(),
+                                         QString(),
+                                         QStringLiteral("settings"),
+                                         QJsonArray{QStringLiteral("InstanceOnly")});
+        mappingField.insert(QStringLiteral("visibility"),
+                            QJsonObject{
+                                {QStringLiteral("fieldKey"), QStringLiteral("activeSliCodes")},
+                                {QStringLiteral("op"), QStringLiteral("contains")},
+                                {QStringLiteral("value"), key},
+                            });
+        instanceFields.append(mappingField);
+    }
+
+    QJsonObject factorySection;
+    factorySection.insert(QStringLiteral("title"), QStringLiteral("Connection"));
+    factorySection.insert(QStringLiteral("fields"), factoryFields);
+    factorySection.insert(QStringLiteral("actions"),
+                          QJsonArray{
+                              action(QStringLiteral("probe"),
+                                     QStringLiteral("Test connection"),
+                                     QStringLiteral("Validate receiver reachability using the current config values."),
+                                     false,
+                                     QJsonObject{
+                                         {QStringLiteral("placement"), QStringLiteral("card")},
+                                         {QStringLiteral("kind"), QStringLiteral("command")},
+                                         {QStringLiteral("requiresAck"), true},
+                                     }),
+                          });
+
+    QJsonObject instanceSection;
+    instanceSection.insert(QStringLiteral("title"), QStringLiteral("Settings"));
+    instanceSection.insert(QStringLiteral("fields"), instanceFields);
+    instanceSection.insert(QStringLiteral("actions"),
+                           QJsonArray{
+                               action(QStringLiteral("settings"),
+                                      QStringLiteral("Settings"),
+                                      QStringLiteral("Update adapter settings."),
+                                      true,
+                                      QJsonObject{
+                                          {QStringLiteral("placement"), QStringLiteral("card")},
+                                          {QStringLiteral("kind"), QStringLiteral("open_dialog")},
+                                          {QStringLiteral("requiresAck"), true},
+                                      }),
+                               action(QStringLiteral("probeCurrentInput"),
+                                      QStringLiteral("Probe current"),
+                                      QStringLiteral("Probe current input and refresh labels."),
+                                      false,
+                                      QJsonObject{
+                                          {QStringLiteral("placement"), QStringLiteral("form_field")},
+                                          {QStringLiteral("kind"), QStringLiteral("command")},
+                                          {QStringLiteral("requiresAck"), true},
+                                      }),
+                           });
+
+    QJsonObject schema;
+    schema.insert(QStringLiteral("factory"), factorySection);
+    schema.insert(QStringLiteral("instance"), instanceSection);
+    return schema;
+}
+
+class OnkyoIpcInstance final : public sdk::AdapterInstance
 {
 public:
-    void onBootstrap(const sdk::BootstrapRequest &request) override
+    explicit OnkyoIpcInstance(QHash<QString, QString> bootstrapInputLabels)
+        : m_defaultInputLabelMap(std::move(bootstrapInputLabels))
     {
-        AdapterSidecar::onBootstrap(request);
-        m_started = false;
+    }
+
+    ~OnkyoIpcInstance() override
+    {
+        stopPollingTimer();
+    }
+
+protected:
+    bool start() override
+    {
+        constexpr int kInitialQueryDelayMs = 1500;
+        m_operationQueue.clear();
+        m_operationRunning = false;
+        m_queuePumpScheduled = false;
+        m_pollQueued = false;
+        m_started = true;
         m_stopping = false;
         m_synced = false;
-        m_lastSeenMs = 0;
-        m_lastConnectAttemptMs = 0;
         m_lastConnectLogMs = 0;
         m_lastConnectError.clear();
+        m_lastReportedPower.reset();
+        m_lastReportedMute.reset();
+        m_lastReportedVolume.reset();
+        m_lastReportedInput.clear();
+        m_hasLastReportedInput = false;
+        m_powerState = PowerState::Unknown;
+        m_consecutiveConnectFailures = 0;
         setConnected(false);
+        QTimer::singleShot(kInitialQueryDelayMs, [this]() {
+            enqueuePollOperation(true);
+        });
+        startPollingTimer();
+        return true;
+    }
+
+    void stop() override
+    {
+        m_stopping = true;
+        m_started = false;
+        m_synced = false;
+        m_lastReportedPower.reset();
+        m_lastReportedMute.reset();
+        m_lastReportedVolume.reset();
+        m_lastReportedInput.clear();
+        m_hasLastReportedInput = false;
+        m_powerState = PowerState::Unknown;
+        m_consecutiveConnectFailures = 0;
+        flushPendingOperations("Instance stopped");
+        setConnected(false);
+        stopPollingTimer();
     }
 
     void onConfigChanged(const sdk::ConfigChangedRequest &request) override
     {
-        AdapterSidecar::onConfigChanged(request);
+        const QStringList previousHosts = effectiveHosts();
+        const std::uint16_t previousPort = m_controlPort;
+        const bool wasConnected = m_connected;
+
         m_info = request.adapter;
         m_meta = parseJsonObject(request.adapter.metaJson);
 
         QJsonObject normalizedPatch;
         const QJsonValue rawActiveCodes = m_meta.value(QStringLiteral("activeSliCodes"));
-        if (rawActiveCodes.isArray()) {
-            const QJsonArray normalizedCodes = normalizeActiveSliCodesArray(rawActiveCodes);
-            if (normalizedCodes != rawActiveCodes.toArray()) {
+        const QJsonArray normalizedCodes = normalizeActiveSliCodesArray(rawActiveCodes);
+        const bool hadRawActiveCodes = !rawActiveCodes.isUndefined() && !rawActiveCodes.isNull();
+        if (hadRawActiveCodes) {
+            if (!rawActiveCodes.isArray() || normalizedCodes != rawActiveCodes.toArray()) {
                 m_meta.insert(QStringLiteral("activeSliCodes"), normalizedCodes);
                 normalizedPatch.insert(QStringLiteral("activeSliCodes"), normalizedCodes);
             }
@@ -324,24 +653,28 @@ public:
         }
 
         applyConfig();
-        {
-            v1::Utf8String err;
-            if (!sendAdapterDescriptorUpdated(descriptor(), &err))
-                std::cerr << "failed to send adapterDescriptorUpdated(config.changed): " << err << '\n';
-        }
+        const QStringList nextHosts = effectiveHosts();
+        const bool endpointChanged = (previousPort != m_controlPort) || (previousHosts != nextHosts);
         m_synced = false;
         m_deviceId = resolveDeviceId();
-        m_lastSeenMs = 0;
-        m_lastConnectAttemptMs = 0;
         m_lastConnectLogMs = 0;
         m_lastConnectError.clear();
+        m_lastReportedPower.reset();
+        m_lastReportedMute.reset();
+        m_lastReportedVolume.reset();
+        m_lastReportedInput.clear();
+        m_hasLastReportedInput = false;
+        m_powerState = PowerState::Unknown;
+        m_consecutiveConnectFailures = 0;
         m_stopping = false;
         m_started = true;
+        flushPendingOperations("Config changed");
 
-        setConnected(false);
+        if (endpointChanged || !wasConnected)
+            setConnected(false);
         emitDeviceSnapshot();
-        requestInitialState();
-        scheduleNextPoll();
+        enqueuePollOperation(true);
+        startPollingTimer();
 
         std::cerr << "onkyo-ipc config.changed adapterId=" << request.adapterId
                   << " externalId=" << request.adapter.externalId
@@ -353,79 +686,235 @@ public:
         m_stopping = true;
         m_started = false;
         m_synced = false;
+        m_lastReportedPower.reset();
+        m_lastReportedMute.reset();
+        m_lastReportedVolume.reset();
+        m_lastReportedInput.clear();
+        m_hasLastReportedInput = false;
+        m_powerState = PowerState::Unknown;
+        m_consecutiveConnectFailures = 0;
+        flushPendingOperations("Instance disconnected");
         setConnected(false);
+        stopPollingTimer();
     }
 
-    v1::Utf8String displayName() const override
+    void onChannelInvoke(const sdk::ChannelInvokeRequest &request) override
     {
-        return "Onkyo / Pioneer";
+        enqueueChannelInvokeOperation(request);
     }
 
-    v1::Utf8String description() const override
+    void onAdapterActionInvoke(const sdk::AdapterActionInvokeRequest &request) override
     {
-        return "Onkyo/Pioneer AVR adapter (ISCP sidecar)";
+        if (request.actionId == "probeCurrentInput") {
+            enqueueProbeCurrentOperation(request);
+            return;
+        }
+        submitActionResult(handleAdapterActionInvoke(request), "adapter.action.invoke");
     }
 
-    v1::Utf8String apiVersion() const override
+    void onDeviceNameUpdate(const sdk::DeviceNameUpdateRequest &request) override
     {
-        return v1::kProtocolLabel;
+        submitCmdResult(handleDeviceNameUpdate(request), "device.name.update");
     }
 
-    v1::Utf8String iconSvg() const override
+    void onDeviceEffectInvoke(const sdk::DeviceEffectInvokeRequest &request) override
     {
-        return kOnkyoIconSvg;
+        submitCmdResult(handleDeviceEffectInvoke(request), "device.effect.invoke");
     }
 
-    int timeoutMs() const override
+    void onSceneInvoke(const sdk::SceneInvokeRequest &request) override
     {
-        return m_presenceTimeoutMs;
+        submitCmdResult(handleSceneInvoke(request), "scene.invoke");
     }
 
-    int maxInstances() const override
+private:
+    enum class PowerState {
+        Unknown,
+        Off,
+        On,
+    };
+
+    struct PendingOperation
     {
-        return 0;
-    }
+        enum class Kind {
+            Poll,
+            ChannelInvoke,
+            ProbeCurrentInput,
+        };
 
-    v1::AdapterCapabilities capabilities() const override
+        Kind kind = Kind::Poll;
+        sdk::ChannelInvokeRequest channelRequest;
+        sdk::AdapterActionInvokeRequest actionRequest;
+    };
+
+    void removeQueuedPollOperations()
     {
-        v1::AdapterCapabilities caps;
-        caps.required = v1::AdapterRequirement::Host | v1::AdapterRequirement::Port;
-        caps.optional = v1::AdapterRequirement::UsesRetryInterval;
-        caps.flags = v1::AdapterFlag::None;
-
-        v1::AdapterActionDescriptor probe;
-        probe.id = "probe";
-        probe.label = "Test connection";
-        probe.description = "Validate receiver reachability using the current config values.";
-        probe.hasForm = false;
-        probe.metaJson = R"({"placement":"card","kind":"command","requiresAck":true})";
-        caps.factoryActions.push_back(probe);
-
-        v1::AdapterActionDescriptor settings;
-        settings.id = "settings";
-        settings.label = "Settings";
-        settings.description = "Update adapter settings.";
-        settings.hasForm = true;
-        settings.metaJson = R"({"placement":"card","kind":"open_dialog","requiresAck":true})";
-        caps.instanceActions.push_back(settings);
-
-        v1::AdapterActionDescriptor probeCurrent;
-        probeCurrent.id = "probeCurrentInput";
-        probeCurrent.label = "Probe current";
-        probeCurrent.description = "Probe current input and refresh labels.";
-        probeCurrent.hasForm = false;
-        probeCurrent.metaJson = R"({"placement":"form_field","kind":"command","requiresAck":true,"reloadStaticConfig":true})";
-        caps.instanceActions.push_back(probeCurrent);
-
-        return caps;
+        for (auto it = m_operationQueue.begin(); it != m_operationQueue.end();) {
+            if (it->kind == PendingOperation::Kind::Poll) {
+                it = m_operationQueue.erase(it);
+                continue;
+            }
+            ++it;
+        }
+        m_pollQueued = false;
     }
 
-    v1::JsonText configSchemaJson() const override
+    void enqueueChannelInvokeOperation(const sdk::ChannelInvokeRequest &request)
     {
-        return toJson(buildConfigSchemaObject());
+        // Command writes should not wait behind stale queued poll work.
+        removeQueuedPollOperations();
+
+        if (request.channelExternalId == kChannelVolume) {
+            for (auto it = m_operationQueue.begin(); it != m_operationQueue.end();) {
+                if (it->kind == PendingOperation::Kind::ChannelInvoke
+                    && it->channelRequest.deviceExternalId == request.deviceExternalId
+                    && it->channelRequest.channelExternalId == kChannelVolume) {
+                    v1::CmdResponse coalesced;
+                    coalesced.id = it->channelRequest.cmdId;
+                    coalesced.tsMs = nowMs();
+                    coalesced.status = v1::CmdStatus::Success;
+                    submitCmdResult(std::move(coalesced), "channel.invoke.coalesced");
+                    it = m_operationQueue.erase(it);
+                    continue;
+                }
+                ++it;
+            }
+        }
+
+        PendingOperation op;
+        op.kind = PendingOperation::Kind::ChannelInvoke;
+        op.channelRequest = request;
+        m_operationQueue.push_back(std::move(op));
+        scheduleQueuePump();
     }
 
-    v1::CmdResponse onChannelInvoke(const sdk::ChannelInvokeRequest &request) override
+    void enqueueProbeCurrentOperation(const sdk::AdapterActionInvokeRequest &request)
+    {
+        PendingOperation op;
+        op.kind = PendingOperation::Kind::ProbeCurrentInput;
+        op.actionRequest = request;
+        m_operationQueue.push_front(std::move(op));
+        scheduleQueuePump();
+    }
+
+    void enqueuePollOperation(bool prioritize)
+    {
+        if (!m_started || m_stopping)
+            return;
+
+        // Keep exactly one queued poll operation at any time.
+        removeQueuedPollOperations();
+
+        PendingOperation op;
+        op.kind = PendingOperation::Kind::Poll;
+        if (prioritize)
+            m_operationQueue.push_front(std::move(op));
+        else
+            m_operationQueue.push_back(std::move(op));
+        m_pollQueued = true;
+        scheduleQueuePump();
+    }
+
+    void scheduleQueuePump()
+    {
+        if (m_queuePumpScheduled)
+            return;
+        m_queuePumpScheduled = true;
+        QTimer::singleShot(0, [this]() {
+            m_queuePumpScheduled = false;
+            pumpQueue();
+        });
+    }
+
+    void pumpQueue()
+    {
+        if (m_operationRunning || m_stopping)
+            return;
+        if (m_operationQueue.empty())
+            return;
+
+        m_operationRunning = true;
+        PendingOperation op = std::move(m_operationQueue.front());
+        m_operationQueue.pop_front();
+        if (op.kind == PendingOperation::Kind::Poll)
+            m_pollQueued = false;
+
+        switch (op.kind) {
+        case PendingOperation::Kind::Poll:
+            if (m_started && !m_stopping)
+                requestInitialState();
+            resetPollTimerCountdown();
+            break;
+        case PendingOperation::Kind::ChannelInvoke: {
+            v1::CmdResponse response = handleChannelInvoke(op.channelRequest);
+            const bool isPowerInvoke = (op.channelRequest.channelExternalId == kChannelPower);
+            const bool cmdSuccess = (response.status == v1::CmdStatus::Success);
+            submitCmdResult(std::move(response), "channel.invoke");
+            if (!isPowerInvoke && cmdSuccess) {
+                resetPollTimerCountdown();
+                QTimer::singleShot(1000, [this]() {
+                    if (m_started && !m_stopping)
+                        enqueuePollOperation(true);
+                });
+            }
+            break;
+        }
+        case PendingOperation::Kind::ProbeCurrentInput: {
+            v1::ActionResponse response = handleAdapterActionInvoke(op.actionRequest);
+            submitActionResult(std::move(response), "adapter.action.invoke");
+            break;
+        }
+        }
+
+        m_operationRunning = false;
+        if (!m_operationQueue.empty())
+            scheduleQueuePump();
+    }
+
+    void flushPendingOperations(const v1::Utf8String &reason)
+    {
+        if (m_operationQueue.empty()) {
+            m_pollQueued = false;
+            return;
+        }
+
+        std::deque<PendingOperation> pending;
+        pending.swap(m_operationQueue);
+        m_pollQueued = false;
+
+        for (PendingOperation &op : pending) {
+            if (op.kind == PendingOperation::Kind::ChannelInvoke) {
+                v1::CmdResponse response;
+                response.id = op.channelRequest.cmdId;
+                response.tsMs = nowMs();
+                response.status = v1::CmdStatus::Failure;
+                response.error = reason;
+                submitCmdResult(std::move(response), "channel.invoke.flush");
+                continue;
+            }
+            if (op.kind == PendingOperation::Kind::ProbeCurrentInput) {
+                v1::ActionResponse response;
+                response.id = op.actionRequest.cmdId;
+                response.tsMs = nowMs();
+                response.status = v1::CmdStatus::Failure;
+                response.error = reason;
+                response.resultType = v1::ActionResultType::None;
+                submitActionResult(std::move(response), "adapter.action.invoke.flush");
+            }
+        }
+    }
+
+    void resetPollTimerCountdown()
+    {
+        if (!m_pollTimer || !m_started || m_stopping)
+            return;
+        updatePollInterval();
+        if (m_pollTimer->isActive())
+            m_pollTimer->stop();
+        m_pollTimer->start();
+    }
+
+    v1::CmdResponse handleChannelInvoke(const sdk::ChannelInvokeRequest &request)
     {
         v1::CmdResponse resp;
         resp.id = request.cmdId;
@@ -444,13 +933,43 @@ public:
                 resp.error = "Power expects boolean";
                 return resp;
             }
-            if (sendIscpCommand(*on ? QByteArrayLiteral("PWR01") : QByteArrayLiteral("PWR00"), false, 0, true)) {
+
+            if (m_powerState == PowerState::On && *on) {
                 resp.status = v1::CmdStatus::Success;
-                resp.finalValue = *on;
-            } else {
+                resp.finalValue = true;
+                return resp;
+            }
+            if (m_powerState == PowerState::Off && !*on) {
+                resp.status = v1::CmdStatus::Success;
+                resp.finalValue = false;
+                return resp;
+            }
+
+            const QByteArray command = *on ? QByteArrayLiteral("PWR01") : QByteArrayLiteral("PWR00");
+            if (!sendIscpCommand(command, false, 0)) {
                 resp.status = unavailableCommandStatus();
                 resp.error = unavailableCommandMessage();
+                return resp;
             }
+
+            resp.status = v1::CmdStatus::Success;
+            resp.finalValue = *on;
+            emitPowerState(*on);
+            return resp;
+        }
+
+        if (m_powerState == PowerState::Unknown)
+            requestInitialState();
+
+        if (m_powerState == PowerState::Off) {
+            resp.status = v1::CmdStatus::Failure;
+            resp.error = "Standby";
+            return resp;
+        }
+
+        if (m_powerState != PowerState::On) {
+            resp.status = v1::CmdStatus::TemporarilyOffline;
+            resp.error = "Power state unknown";
             return resp;
         }
 
@@ -468,9 +987,10 @@ public:
                 m_volumeMaxRaw);
             const QByteArray payload =
                 QByteArrayLiteral("MVL") + QByteArray::number(rawValue, 16).rightJustified(2, '0').toUpper();
-            if (sendIscpCommand(payload, false, 0, true)) {
+            if (sendIscpCommand(payload, false, 0)) {
                 resp.status = v1::CmdStatus::Success;
-                resp.finalValue = clampedPercent;
+                resp.finalValue = static_cast<std::int64_t>(qRound(clampedPercent));
+                emitVolumeState(static_cast<std::int64_t>(qRound(clampedPercent)));
             } else {
                 resp.status = unavailableCommandStatus();
                 resp.error = unavailableCommandMessage();
@@ -485,9 +1005,10 @@ public:
                 resp.error = "Mute expects boolean";
                 return resp;
             }
-            if (sendIscpCommand(*muted ? QByteArrayLiteral("AMT01") : QByteArrayLiteral("AMT00"), false, 0, true)) {
+            if (sendIscpCommand(*muted ? QByteArrayLiteral("AMT01") : QByteArrayLiteral("AMT00"), false, 0)) {
                 resp.status = v1::CmdStatus::Success;
                 resp.finalValue = *muted;
+                emitMuteState(*muted);
             } else {
                 resp.status = unavailableCommandStatus();
                 resp.error = unavailableCommandMessage();
@@ -513,9 +1034,11 @@ public:
                 return resp;
             }
 
-            if (sendIscpCommand(QByteArrayLiteral("SLI") + input.toLatin1(), false, 0, true)) {
+            if (sendIscpCommand(QByteArrayLiteral("SLI") + input.toLatin1(), false, 0)) {
                 resp.status = v1::CmdStatus::Success;
                 resp.finalValue = input.toStdString();
+                m_lastInputCode = input;
+                emitInputState(input);
             } else {
                 resp.status = unavailableCommandStatus();
                 resp.error = unavailableCommandMessage();
@@ -528,50 +1051,11 @@ public:
         return resp;
     }
 
-    v1::ActionResponse onAdapterActionInvoke(const sdk::AdapterActionInvokeRequest &request) override
+    v1::ActionResponse handleAdapterActionInvoke(const sdk::AdapterActionInvokeRequest &request)
     {
         v1::ActionResponse resp;
         resp.id = request.cmdId;
         resp.tsMs = nowMs();
-
-        if (request.actionId == "probe") {
-            const QJsonObject params = parseJsonObject(request.paramsJson);
-            const QStringList hosts = resolveProbeHosts(params);
-            const std::uint16_t port = resolveProbePort(params);
-            if (hosts.isEmpty() || port == 0) {
-                resp.status = v1::CmdStatus::InvalidArgument;
-                resp.error = "Probe requires host/ip and iscpPort";
-                return resp;
-            }
-
-            QString errorMessage;
-            QString successfulHost;
-            for (const QString &host : hosts) {
-                QString hostError;
-                if (probeEndpoint(host, port, &hostError)) {
-                    successfulHost = host;
-                    break;
-                }
-                if (!hostError.isEmpty()) {
-                    errorMessage = QStringLiteral("%1 (%2:%3)")
-                        .arg(hostError, host)
-                        .arg(port);
-                }
-            }
-
-            if (!successfulHost.isEmpty()) {
-                resp.status = v1::CmdStatus::Success;
-                resp.resultType = v1::ActionResultType::String;
-                resp.resultValue = QStringLiteral("%1:%2").arg(successfulHost).arg(port).toStdString();
-            } else {
-                resp.status = v1::CmdStatus::Failure;
-                resp.error = errorMessage.isEmpty()
-                    ? QStringLiteral("Receiver unavailable").toStdString()
-                    : errorMessage.toStdString();
-                resp.errorContext = "factory.action";
-            }
-            return resp;
-        }
 
         if (request.actionId == "settings") {
             const QJsonObject params = parseJsonObject(request.paramsJson);
@@ -609,8 +1093,6 @@ public:
                 v1::Utf8String err;
                 if (!sendAdapterMetaUpdated(toJson(patch), &err))
                     std::cerr << "failed to send adapterMetaUpdated: " << err << '\n';
-                if (!sendAdapterDescriptorUpdated(descriptor(), &err))
-                    std::cerr << "failed to send adapterDescriptorUpdated(settings): " << err << '\n';
                 if (m_synced && !m_deviceId.empty()) {
                     v1::Utf8String chErr;
                     if (!sendChannelUpdated(m_deviceId, buildInputChannel(), &chErr))
@@ -618,7 +1100,7 @@ public:
                 } else {
                     emitDeviceSnapshot();
                 }
-                requestInitialState();
+                enqueuePollOperation(true);
             }
             resp.status = v1::CmdStatus::Success;
             resp.resultType = v1::ActionResultType::None;
@@ -628,7 +1110,11 @@ public:
         if (request.actionId == "probeCurrentInput") {
             const QString before = m_lastInputCode;
             QString resolvedCode;
-            if (!sendIscpCommand(QByteArrayLiteral("SLIQSTN"), true, 1500, true)) {
+            if (!sendIscpCommand(QByteArrayLiteral("SLIQSTN"),
+                                 true,
+                                 700,
+                                 900,
+                                 1)) {
                 resp.status = unavailableCommandStatus();
                 resp.error = unavailableCommandMessage();
             } else if (!m_lastInputCode.isEmpty()) {
@@ -674,7 +1160,7 @@ public:
                 patch.insert(QStringLiteral("activeSliCodes"), nextActive);
                 const QString labelKey = QStringLiteral("inputLabel_%1").arg(normalized);
                 const QString existingLabel = m_meta.value(labelKey).toString().trimmed();
-                const QString defaultLabel = buildInputLabelMap().value(normalized).trimmed();
+                const QString defaultLabel = m_defaultInputLabelMap.value(normalized).trimmed();
                 const QString fallbackLabel = QStringLiteral("SLI %1").arg(normalized);
                 const auto isGenericSliLabel = [&normalized](const QString &label) {
                     QString compact = label.trimmed();
@@ -694,11 +1180,18 @@ public:
                 m_info.metaJson = toJson(m_meta);
                 applyConfig();
 
+                resp.formValuesJson = toJson(QJsonObject{
+                    {QStringLiteral("activeSliCodes"), nextActive},
+                    {QStringLiteral("currentInputCode"), normalized},
+                });
+                resp.fieldChoicesJson = toJson(QJsonObject{
+                    {QStringLiteral("activeSliCodes"), optionsToChoiceJson(inputChoicesForChannel())},
+                });
+                resp.reloadLayout = true;
+
                 v1::Utf8String err;
                 if (!sendAdapterMetaUpdated(toJson(patch), &err))
                     std::cerr << "failed to send adapterMetaUpdated(probeCurrentInput): " << err << '\n';
-                if (!sendAdapterDescriptorUpdated(descriptor(), &err))
-                    std::cerr << "failed to send adapterDescriptorUpdated(probeCurrentInput): " << err << '\n';
             }
             return resp;
         }
@@ -708,7 +1201,7 @@ public:
         return resp;
     }
 
-    v1::CmdResponse onDeviceNameUpdate(const sdk::DeviceNameUpdateRequest &request) override
+    v1::CmdResponse handleDeviceNameUpdate(const sdk::DeviceNameUpdateRequest &request)
     {
         v1::CmdResponse resp;
         resp.id = request.cmdId;
@@ -718,7 +1211,7 @@ public:
         return resp;
     }
 
-    v1::CmdResponse onDeviceEffectInvoke(const sdk::DeviceEffectInvokeRequest &request) override
+    v1::CmdResponse handleDeviceEffectInvoke(const sdk::DeviceEffectInvokeRequest &request)
     {
         v1::CmdResponse resp;
         resp.id = request.cmdId;
@@ -728,7 +1221,7 @@ public:
         return resp;
     }
 
-    v1::CmdResponse onSceneInvoke(const sdk::SceneInvokeRequest &request) override
+    v1::CmdResponse handleSceneInvoke(const sdk::SceneInvokeRequest &request)
     {
         v1::CmdResponse resp;
         resp.id = request.cmdId;
@@ -738,369 +1231,95 @@ public:
         return resp;
     }
 
-    void tick()
-    {
-        if (!m_started || m_stopping)
-            return;
-
-        if (!m_synced)
-            emitDeviceSnapshot();
-
-        const std::int64_t now = nowMs();
-        if (now >= m_nextPollDueMs) {
-            requestInitialState();
-            scheduleNextPoll();
-        }
-
-        if (m_lastSeenMs > 0 && m_connected && (now - m_lastSeenMs > m_presenceTimeoutMs)) {
-            setConnected(false);
-            v1::Utf8String err;
-            if (!sendChannelStateUpdated(m_deviceId,
-                                         kChannelConnectivity,
-                                         static_cast<std::int64_t>(v1::ConnectivityStatus::Disconnected),
-                                         now,
-                                         &err)) {
-                std::cerr << "failed to send disconnected connectivity state: " << err << '\n';
-            }
-        }
-    }
-
 private:
-    QStringList resolveProbeHosts(const QJsonObject &params) const
+    void startPollingTimer()
     {
-        QStringList result;
-        auto appendIfMissing = [&result](const QString &value) {
-            const QString normalized = value.trimmed();
-            if (normalized.isEmpty())
-                return;
-            if (!result.contains(normalized))
-                result.push_back(normalized);
-        };
-
-        auto appendHostsFromObject = [&appendIfMissing](const QJsonObject &obj) {
-            appendIfMissing(obj.value(QStringLiteral("host")).toString());
-            appendIfMissing(obj.value(QStringLiteral("ip")).toString());
-        };
-
-        appendHostsFromObject(params);
-        return result;
-    }
-
-    std::uint16_t resolveProbePort(const QJsonObject &params) const
-    {
-        auto parsePort = [](const QJsonValue &value) -> std::uint16_t {
-            if (value.isDouble())
-                return normalizedPort(value.toInt());
-            if (value.isString()) {
-                bool ok = false;
-                const int parsed = value.toString().trimmed().toInt(&ok, 10);
-                if (ok)
-                    return normalizedPort(parsed);
-            }
-            return 0;
-        };
-
-        return parsePort(params.value(QStringLiteral("iscpPort")));
-    }
-
-    bool probeEndpoint(const QString &host, std::uint16_t port, QString *errorMessage) const
-    {
-        QTcpSocket socket;
-        socket.connectToHost(host, port);
-        if (!socket.waitForConnected(1500)) {
-            if (errorMessage)
-                *errorMessage = socket.errorString();
-            return false;
+        if (!m_pollTimer) {
+            m_pollTimer = std::make_unique<QTimer>();
+            m_pollTimer->setSingleShot(false);
+            QObject::connect(m_pollTimer.get(), &QTimer::timeout, [this]() {
+                enqueuePollOperation(false);
+            });
         }
-        socket.disconnectFromHost();
-        return true;
+        updatePollInterval();
+        if (!m_pollTimer->isActive())
+            m_pollTimer->start();
     }
 
-    QJsonArray activeSliCodesFromMeta() const
+    void stopPollingTimer()
     {
-        return normalizeActiveSliCodesArray(m_meta.value(QStringLiteral("activeSliCodes")));
-    }
-
-    QJsonArray inputChoicesForSchema() const
-    {
-        QJsonArray choices;
-        const QStringList activeCodes = editableSliCodesForSchema();
-        for (const QString &key : activeCodes) {
-            QJsonObject option;
-            option.insert(QStringLiteral("value"), key);
-            option.insert(QStringLiteral("label"),
-                          m_inputLabelMap.value(key).isEmpty()
-                              ? QStringLiteral("SLI %1").arg(key)
-                              : m_inputLabelMap.value(key));
-            choices.append(option);
-        }
-        return choices;
-    }
-
-    QStringList editableSliCodesForSchema() const
-    {
-        QSet<QString> codeSet;
-        const QJsonArray activeCodes = activeSliCodesFromMeta();
-        for (const QJsonValue &entry : activeCodes)
-            codeSet.insert(normalizeSliCode(entry.toString()));
-
-        codeSet.remove(QString());
-        QStringList out = codeSet.values();
-        std::sort(out.begin(), out.end());
-        return out;
+        if (m_pollTimer && m_pollTimer->isActive())
+            m_pollTimer->stop();
     }
 
     v1::AdapterConfigOptionList inputChoicesForChannel() const
     {
         v1::AdapterConfigOptionList choices;
-        QStringList keys = m_inputLabelMap.keys();
-        std::sort(keys.begin(), keys.end());
+        const QJsonArray normalizedActive = normalizeActiveSliCodesArray(m_meta.value(QStringLiteral("activeSliCodes")));
+        QStringList keys;
+        keys.reserve(normalizedActive.size());
+        for (const QJsonValue &entry : normalizedActive) {
+            const QString code = normalizeSliCode(entry.toString());
+            if (!code.isEmpty() && !keys.contains(code))
+                keys.push_back(code);
+        }
+        if (keys.isEmpty()) {
+            keys = m_defaultInputLabelMap.keys();
+            std::sort(keys.begin(), keys.end());
+        }
+        if (keys.isEmpty()) {
+            keys = m_inputLabelMap.keys();
+            std::sort(keys.begin(), keys.end());
+        }
         choices.reserve(static_cast<std::size_t>(keys.size()));
         for (const QString &key : keys) {
             v1::AdapterConfigOption option;
             option.value = key.toStdString();
-            const QString label = m_inputLabelMap.value(key).trimmed();
-            option.label = (label.isEmpty() ? QStringLiteral("SLI %1").arg(key) : label).toStdString();
+            option.label = formatSliDisplayLabel(key, m_inputLabelMap.value(key)).toStdString();
             choices.push_back(std::move(option));
         }
         return choices;
     }
 
-    QJsonObject buildConfigSchemaObject() const
-    {
-        auto field = [](QString key,
-                        QString type,
-                        QString label,
-                        QJsonValue defaultValue = QJsonValue(),
-                        QString actionId = QString(),
-                        QString actionLabel = QString(),
-                        QString parentActionId = QString(),
-                        QJsonArray flags = QJsonArray(),
-                        QJsonValue choices = QJsonValue(),
-                        QJsonObject meta = QJsonObject(),
-                        QJsonObject layout = QJsonObject()) {
-            QJsonObject obj;
-            obj.insert(QStringLiteral("key"), key);
-            obj.insert(QStringLiteral("type"), type);
-            obj.insert(QStringLiteral("label"), label);
-            if (!defaultValue.isUndefined() && !defaultValue.isNull())
-                obj.insert(QStringLiteral("default"), defaultValue);
-            if (!actionId.isEmpty())
-                obj.insert(QStringLiteral("actionId"), actionId);
-            if (!actionLabel.isEmpty())
-                obj.insert(QStringLiteral("actionLabel"), actionLabel);
-            if (!parentActionId.isEmpty())
-                obj.insert(QStringLiteral("parentActionId"), parentActionId);
-            if (!flags.isEmpty())
-                obj.insert(QStringLiteral("flags"), flags);
-            if (choices.isArray())
-                obj.insert(QStringLiteral("choices"), choices);
-            if (!meta.isEmpty())
-                obj.insert(QStringLiteral("meta"), meta);
-            if (!layout.isEmpty())
-                obj.insert(QStringLiteral("layout"), layout);
-            return obj;
-        };
-        auto action = [](QString id,
-                         QString label,
-                         QString description,
-                         bool hasForm,
-                         QJsonObject meta = QJsonObject()) {
-            QJsonObject obj;
-            obj.insert(QStringLiteral("id"), id);
-            obj.insert(QStringLiteral("label"), label);
-            obj.insert(QStringLiteral("description"), description);
-            obj.insert(QStringLiteral("hasForm"), hasForm);
-            if (!meta.isEmpty())
-                obj.insert(QStringLiteral("meta"), meta);
-            return obj;
-        };
-
-        QJsonArray factoryFields;
-        const QString resolvedHost = !QString::fromStdString(m_info.ip).trimmed().isEmpty()
-            ? QString::fromStdString(m_info.ip).trimmed()
-            : QString::fromStdString(m_info.host).trimmed();
-        if (!resolvedHost.isEmpty()) {
-            factoryFields.append(field(QStringLiteral("host"),
-                                       QStringLiteral("Hostname"),
-                                       QStringLiteral("Host"),
-                                       resolvedHost));
-        } else {
-            factoryFields.append(field(QStringLiteral("host"),
-                                       QStringLiteral("Hostname"),
-                                       QStringLiteral("Host")));
-        }
-        const int configuredIscpPort = static_cast<int>(
-            normalizedPort(m_meta.value(QStringLiteral("iscpPort")).toInt(0)));
-        const int defaultPort = (configuredIscpPort > 0)
-            ? configuredIscpPort
-            : (m_info.port > 0 ? static_cast<int>(m_info.port) : 60128);
-        factoryFields.append(field(QStringLiteral("iscpPort"),
-                                   QStringLiteral("Port"),
-                                   QStringLiteral("ISCP Port"),
-                                   defaultPort));
-        factoryFields.append(field(QStringLiteral("pollIntervalMs"),
-                                   QStringLiteral("Integer"),
-                                   QStringLiteral("Poll interval"),
-                                   m_pollIntervalMs));
-        factoryFields.append(field(QStringLiteral("retryIntervalMs"),
-                                   QStringLiteral("Integer"),
-                                   QStringLiteral("Retry interval"),
-                                   m_retryIntervalMs));
-
-        QJsonArray instanceFields;
-        instanceFields.append(field(QStringLiteral("volumeMaxRaw"),
-                                    QStringLiteral("Integer"),
-                                    QStringLiteral("Max volume raw"),
-                                    m_volumeMaxRaw,
-                                    QString(),
-                                    QString(),
-                                    QStringLiteral("settings"),
-                                    QJsonArray{QStringLiteral("InstanceOnly")}));
-        instanceFields.append(field(QStringLiteral("activeSliCodes"),
-                                    QStringLiteral("Select"),
-                                    QStringLiteral("Active SLI codes"),
-                                    activeSliCodesFromMeta(),
-                                    QString(),
-                                    QString(),
-                                    QStringLiteral("settings"),
-                                    QJsonArray{QStringLiteral("Multi"), QStringLiteral("InstanceOnly")},
-                                    inputChoicesForSchema(),
-                                    QJsonObject{{QStringLiteral("reloadActionLayoutOnChange"), true}}));
-        instanceFields.append(field(QStringLiteral("currentInputCode"),
-                                    QStringLiteral("String"),
-                                    QStringLiteral("Current input (SLI)"),
-                                    QJsonValue(),
-                                    QStringLiteral("probeCurrentInput"),
-                                    QStringLiteral("Probe current"),
-                                    QStringLiteral("settings"),
-                                    QJsonArray{
-                                        QStringLiteral("ReadOnly"),
-                                        QStringLiteral("Transient"),
-                                        QStringLiteral("InstanceOnly"),
-                                    },
-                                    QJsonValue(),
-                                    QJsonObject{
-                                        {QStringLiteral("appendTo"), QStringLiteral("activeSliCodes")},
-                                        {QStringLiteral("reloadStaticConfig"), true},
-                                    },
-                                    QJsonObject{{QStringLiteral("actionPosition"), QStringLiteral("inline")}}));
-
-        const QStringList editableCodes = editableSliCodesForSchema();
-        for (const QString &code : editableCodes) {
-            const QString key = QStringLiteral("inputLabel_%1").arg(code);
-            QString labelValue = m_meta.value(key).toString().trimmed();
-            if (labelValue.isEmpty())
-                labelValue = m_inputLabelMap.value(code).trimmed();
-            if (labelValue.isEmpty())
-                labelValue = QStringLiteral("SLI %1").arg(code);
-
-            QJsonObject mappingField = field(key,
-                                             QStringLiteral("String"),
-                                             QStringLiteral("SLI %1 label").arg(code),
-                                             labelValue,
-                                             QString(),
-                                             QString(),
-                                             QStringLiteral("settings"),
-                                             QJsonArray{QStringLiteral("InstanceOnly")});
-            mappingField.insert(QStringLiteral("visibility"),
-                                QJsonObject{
-                                    {QStringLiteral("fieldKey"), QStringLiteral("activeSliCodes")},
-                                    {QStringLiteral("op"), QStringLiteral("contains")},
-                                    {QStringLiteral("value"), code},
-                                });
-            instanceFields.append(mappingField);
-        }
-
-        QJsonObject factorySection;
-        factorySection.insert(QStringLiteral("title"), QStringLiteral("Connection"));
-        factorySection.insert(QStringLiteral("fields"), factoryFields);
-        factorySection.insert(QStringLiteral("actions"),
-                              QJsonArray{
-                                  action(QStringLiteral("probe"),
-                                         QStringLiteral("Test connection"),
-                                         QStringLiteral("Validate receiver reachability using the current config values."),
-                                         false,
-                                         QJsonObject{
-                                             {QStringLiteral("placement"), QStringLiteral("card")},
-                                             {QStringLiteral("kind"), QStringLiteral("command")},
-                                             {QStringLiteral("requiresAck"), true},
-                                         }),
-                              });
-
-        QJsonObject instanceSection;
-        instanceSection.insert(QStringLiteral("title"), QStringLiteral("Settings"));
-        instanceSection.insert(QStringLiteral("fields"), instanceFields);
-        instanceSection.insert(QStringLiteral("actions"),
-                               QJsonArray{
-                                   action(QStringLiteral("settings"),
-                                          QStringLiteral("Settings"),
-                                          QStringLiteral("Update adapter settings."),
-                                          true,
-                                          QJsonObject{
-                                              {QStringLiteral("placement"), QStringLiteral("card")},
-                                              {QStringLiteral("kind"), QStringLiteral("open_dialog")},
-                                              {QStringLiteral("requiresAck"), true},
-                                          }),
-                                   action(QStringLiteral("probeCurrentInput"),
-                                          QStringLiteral("Probe current"),
-                                          QStringLiteral("Probe current input and refresh labels."),
-                                          false,
-                                          QJsonObject{
-                                              {QStringLiteral("placement"), QStringLiteral("form_field")},
-                                              {QStringLiteral("kind"), QStringLiteral("command")},
-                                              {QStringLiteral("requiresAck"), true},
-                                              {QStringLiteral("reloadStaticConfig"), true},
-                                          }),
-                               });
-
-        QJsonObject schema;
-        schema.insert(QStringLiteral("factory"), factorySection);
-        schema.insert(QStringLiteral("instance"), instanceSection);
-        return schema;
-    }
-
     void applyConfig()
     {
-        const int configuredIscpPort = m_meta.value(QStringLiteral("iscpPort")).toInt(0);
-        m_controlPort = resolvedControlPort(normalizedPort(configuredIscpPort));
+        const std::uint16_t configuredIscpPort =
+            normalizedPort(m_meta.value(QStringLiteral("iscpPort")).toInt(0));
+        const std::uint16_t discoveredPort = normalizedPort(static_cast<int>(m_info.port));
+        const std::uint16_t effectivePort = configuredIscpPort > 0 ? configuredIscpPort : discoveredPort;
+        m_controlPort = resolvedControlPort(effectivePort);
         m_pollIntervalMs = qBound(500,
                                   m_meta.value(QStringLiteral("pollIntervalMs")).toInt(5000),
                                   300000);
         m_retryIntervalMs = qBound(1000,
                                    m_meta.value(QStringLiteral("retryIntervalMs")).toInt(10000),
                                    300000);
-        const int computedPresenceTimeout = qMax(m_pollIntervalMs * 3, m_retryIntervalMs + 2000);
-        m_presenceTimeoutMs = qBound(5000, computedPresenceTimeout, 900000);
         m_volumeMaxRaw = qBound(1,
                                 m_meta.value(QStringLiteral("volumeMaxRaw")).toInt(160),
                                 500);
         reloadInputLabelMap();
+        updatePollInterval();
     }
 
     QStringList effectiveHosts() const
     {
         QStringList result;
         const QString ip = QString::fromStdString(m_info.ip).trimmed();
-        if (!ip.isEmpty())
-            result.push_back(ip);
+        if (!ip.isEmpty()) {
+            QHostAddress addr;
+            if (addr.setAddress(ip))
+                result.push_back(ip);
+        }
         return result;
     }
 
-    void scheduleNextPoll()
+    void updatePollInterval()
     {
-        const std::int64_t interval = m_connected ? m_pollIntervalMs : m_retryIntervalMs;
-        m_nextPollDueMs = nowMs() + interval;
-    }
-
-    bool canAttemptConnect() const
-    {
-        return (nowMs() - m_lastConnectAttemptMs) >= m_retryIntervalMs;
-    }
-
-    void markConnectAttempt()
-    {
-        m_lastConnectAttemptMs = nowMs();
+        if (!m_pollTimer)
+            return;
+        const int interval = m_connected ? m_pollIntervalMs : m_retryIntervalMs;
+        if (m_pollTimer->interval() != interval)
+            m_pollTimer->setInterval(interval);
     }
 
     void logConnectFailure(const QString &error, const QString &host)
@@ -1116,93 +1335,397 @@ private:
                   << " port=" << m_controlPort << '\n';
     }
 
+    void markConnectSuccess()
+    {
+        const bool wasConnected = m_connected;
+        m_consecutiveConnectFailures = 0;
+        setConnected(true);
+        if (!wasConnected)
+            emitChannelState(QString::fromLatin1(kChannelConnectivity),
+                             static_cast<std::int64_t>(v1::ConnectivityStatus::Connected));
+    }
+
+    void markConnectFailure()
+    {
+        if (m_consecutiveConnectFailures < std::numeric_limits<int>::max())
+            ++m_consecutiveConnectFailures;
+        if (m_consecutiveConnectFailures < kConnectFailuresBeforeDisconnect)
+            return;
+        const bool wasConnected = m_connected;
+        setConnected(false);
+        if (wasConnected)
+            emitChannelState(QString::fromLatin1(kChannelConnectivity),
+                             static_cast<std::int64_t>(v1::ConnectivityStatus::Disconnected));
+        m_powerState = PowerState::Unknown;
+    }
+
+    bool hasQueuedPriorityWork() const
+    {
+        for (const PendingOperation &op : m_operationQueue) {
+            if (op.kind != PendingOperation::Kind::Poll)
+                return true;
+        }
+        return false;
+    }
+
     bool sendIscpCommand(const QByteArray &command,
                          bool parseResponse,
                          int responseTimeoutMs,
-                         bool bypassRetryGate = false)
+                         int connectTimeoutMs = 1500,
+                         int maxAttempts = 2)
+    {
+        QElapsedTimer totalTimer;
+        totalTimer.start();
+        const QStringList hostCandidates = effectiveHosts();
+        if (hostCandidates.isEmpty() || m_controlPort == 0) {
+            trace(QStringLiteral("iscp skip cmd=%1 reason=no-host-or-port hostCount=%2 port=%3")
+                      .arg(QString::fromLatin1(command))
+                      .arg(hostCandidates.size())
+                      .arg(m_controlPort));
+            return false;
+        }
+        trace(QStringLiteral("iscp start cmd=%1 parseResponse=%2 responseTimeoutMs=%3 hosts=%4 port=%5")
+                  .arg(QString::fromLatin1(command))
+                  .arg(parseResponse ? 1 : 0)
+                  .arg(responseTimeoutMs)
+                  .arg(hostCandidates.join(QLatin1Char(',')))
+                  .arg(m_controlPort));
+
+        auto connectSocket = [&](QTcpSocket &socket, QString &connectedHost) -> bool {
+            for (const QString &host : hostCandidates) {
+                QElapsedTimer connectTimer;
+                connectTimer.start();
+                socket.abort();
+                socket.connectToHost(host, m_controlPort);
+
+                int waitedMs = 0;
+                while (!socket.waitForConnected(100)) {
+                    waitedMs += 100;
+                    if (waitedMs >= connectTimeoutMs) {
+                        if (socket.state() != QAbstractSocket::ConnectedState)
+                            logConnectFailure(socket.errorString(), host);
+                        break;
+                    }
+                }
+                if (socket.state() == QAbstractSocket::ConnectedState) {
+                    connectedHost = host;
+                    trace(QStringLiteral("iscp connected cmd=%1 host=%2 port=%3 connectElapsedMs=%4")
+                              .arg(QString::fromLatin1(command))
+                              .arg(host)
+                              .arg(m_controlPort)
+                              .arg(connectTimer.elapsed()));
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        auto executeOnce = [&](QTcpSocket &socket, const qint64 afterConnectMs) -> bool {
+            if (!kUseEiscp) {
+                const QByteArray terminator = kUseCrlf ? QByteArrayLiteral("\r\n") : QByteArrayLiteral("\r");
+                trace(QStringLiteral("iscp phase cmd=%1 phase=write-begin elapsedMs=%2")
+                          .arg(QString::fromLatin1(command))
+                          .arg(afterConnectMs));
+                if (socket.write(QByteArrayLiteral("!1") + command + terminator) < 0) {
+                    trace(QStringLiteral("iscp write-failed cmd=%1 mode=plain error=%2")
+                              .arg(QString::fromLatin1(command))
+                              .arg(socket.errorString()));
+                    return false;
+                }
+                trace(QStringLiteral("iscp phase cmd=%1 phase=write-end elapsedMs=%2")
+                          .arg(QString::fromLatin1(command))
+                          .arg(totalTimer.elapsed()));
+
+                if (parseResponse && responseTimeoutMs > 0) {
+                    if (!socket.waitForReadyRead(responseTimeoutMs))
+                        return false;
+                    const QByteArray data = socket.readAll();
+                    if (data.isEmpty())
+                        return false;
+                    processResponseData(data);
+                }
+                return true;
+            }
+
+            const QByteArray frame = buildEiscpFrame(command);
+            trace(QStringLiteral("iscp phase cmd=%1 phase=write-begin elapsedMs=%2")
+                      .arg(QString::fromLatin1(command))
+                      .arg(afterConnectMs));
+            if (socket.write(frame) < 0) {
+                trace(QStringLiteral("iscp write-failed cmd=%1 mode=eiscp error=%2")
+                          .arg(QString::fromLatin1(command))
+                          .arg(socket.errorString()));
+                return false;
+            }
+            trace(QStringLiteral("iscp phase cmd=%1 phase=write-end elapsedMs=%2")
+                      .arg(QString::fromLatin1(command))
+                      .arg(totalTimer.elapsed()));
+
+            if (!parseResponse || responseTimeoutMs <= 0)
+                return true;
+
+            QByteArray data;
+            int readWaitedMs = 0;
+            bool firstWaitLogged = false;
+            trace(QStringLiteral("iscp phase cmd=%1 phase=read-loop-begin elapsedMs=%2 timeoutMs=%3")
+                      .arg(QString::fromLatin1(command))
+                      .arg(totalTimer.elapsed())
+                      .arg(responseTimeoutMs));
+            while (readWaitedMs < responseTimeoutMs) {
+                const bool ready = socket.waitForReadyRead(100);
+                if (!firstWaitLogged) {
+                    trace(QStringLiteral("iscp phase cmd=%1 phase=first-readyread ready=%2 elapsedMs=%3")
+                              .arg(QString::fromLatin1(command))
+                              .arg(ready ? 1 : 0)
+                              .arg(totalTimer.elapsed()));
+                    firstWaitLogged = true;
+                }
+                if (ready) {
+                    data.append(socket.readAll());
+                    QElapsedTimer coalesceTimer;
+                    coalesceTimer.start();
+                    while (coalesceTimer.elapsed() < 120) {
+                        if (!socket.waitForReadyRead(10))
+                            break;
+                        const QByteArray chunk = socket.readAll();
+                        if (chunk.isEmpty())
+                            break;
+                        data.append(chunk);
+                    }
+                    break;
+                }
+                readWaitedMs += 100;
+            }
+
+            trace(QStringLiteral("iscp read cmd=%1 readWaitedMs=%2 bytes=%3")
+                      .arg(QString::fromLatin1(command))
+                      .arg(readWaitedMs)
+                      .arg(data.size()));
+            if (data.isEmpty())
+                return false;
+
+            processResponseData(data);
+            return true;
+        };
+
+        if (maxAttempts < 1)
+            maxAttempts = 1;
+        bool hadConnectedSession = false;
+        for (int attempt = 0; attempt < maxAttempts; ++attempt) {
+            QTcpSocket socket;
+            socket.setSocketOption(QAbstractSocket::KeepAliveOption, 1);
+            QString connectedHost;
+            if (!connectSocket(socket, connectedHost))
+                continue;
+
+            hadConnectedSession = true;
+            markConnectSuccess();
+            const bool ok = executeOnce(socket, totalTimer.elapsed());
+
+            trace(QStringLiteral("iscp phase cmd=%1 phase=disconnect-begin elapsedMs=%2")
+                      .arg(QString::fromLatin1(command))
+                      .arg(totalTimer.elapsed()));
+            socket.disconnectFromHost();
+            if (socket.state() != QAbstractSocket::UnconnectedState) {
+                int disconnectWaitedMs = 0;
+                while (socket.state() != QAbstractSocket::UnconnectedState && disconnectWaitedMs < 300) {
+                    socket.waitForDisconnected(50);
+                    disconnectWaitedMs += 50;
+                }
+            }
+            trace(QStringLiteral("iscp phase cmd=%1 phase=disconnect-end elapsedMs=%2")
+                      .arg(QString::fromLatin1(command))
+                      .arg(totalTimer.elapsed()));
+
+            if (ok) {
+                trace(QStringLiteral("iscp done cmd=%1 elapsedMs=%2 attempt=%3")
+                          .arg(QString::fromLatin1(command))
+                          .arg(totalTimer.elapsed())
+                          .arg(attempt + 1));
+                return true;
+            }
+        }
+
+        if (!hadConnectedSession)
+            markConnectFailure();
+        trace(QStringLiteral("iscp failed cmd=%1 totalElapsedMs=%2")
+                  .arg(QString::fromLatin1(command))
+                  .arg(totalTimer.elapsed()));
+        return false;
+    }
+
+    bool sendIscpPollBatch(const std::array<QByteArray, 4> &commands,
+                           int responseTimeoutMs)
     {
         const int connectTimeoutMs = 1500;
         const QStringList hostCandidates = effectiveHosts();
         if (hostCandidates.isEmpty() || m_controlPort == 0)
             return false;
-        if (!bypassRetryGate && !m_connected && !canAttemptConnect())
+        bool interrupted = false;
+        auto shouldInterrupt = [&]() -> bool {
+            if (hasQueuedPriorityWork()) {
+                interrupted = true;
+                return true;
+            }
             return false;
+        };
 
-        QTcpSocket socket;
-        socket.setSocketOption(QAbstractSocket::KeepAliveOption, 1);
-        markConnectAttempt();
+        auto connectSocket = [&](QTcpSocket &socket) -> bool {
+            for (const QString &host : hostCandidates) {
+                if (shouldInterrupt())
+                    return false;
+                socket.abort();
+                socket.connectToHost(host, m_controlPort);
 
-        for (const QString &host : hostCandidates) {
-            socket.abort();
-            socket.connectToHost(host, m_controlPort);
-
-            int waitedMs = 0;
-            while (!socket.waitForConnected(100)) {
-                waitedMs += 100;
-                if (waitedMs >= connectTimeoutMs) {
-                    if (socket.state() != QAbstractSocket::ConnectedState)
-                        logConnectFailure(socket.errorString(), host);
-                    break;
+                int waitedMs = 0;
+                while (!socket.waitForConnected(100)) {
+                    if (shouldInterrupt()) {
+                        socket.abort();
+                        return false;
+                    }
+                    waitedMs += 100;
+                    if (waitedMs >= connectTimeoutMs) {
+                        if (socket.state() != QAbstractSocket::ConnectedState)
+                            logConnectFailure(socket.errorString(), host);
+                        break;
+                    }
                 }
+                if (socket.state() == QAbstractSocket::ConnectedState)
+                    return true;
             }
-            if (socket.state() == QAbstractSocket::ConnectedState)
-                break;
-        }
-
-        if (socket.state() != QAbstractSocket::ConnectedState)
             return false;
+        };
 
-        markSeen();
-
-        if (!kUseEiscp) {
-            const QByteArray terminator = kUseCrlf ? QByteArrayLiteral("\r\n") : QByteArrayLiteral("\r");
-            socket.write(QByteArrayLiteral("!1") + command + terminator);
-            socket.flush();
-            if (parseResponse && responseTimeoutMs > 0 && socket.waitForReadyRead(responseTimeoutMs)) {
+        auto sendQueryOnConnectedSocket = [&](QTcpSocket &socket, const QByteArray &command) -> bool {
+            if (!kUseEiscp) {
+                const QByteArray terminator = kUseCrlf ? QByteArrayLiteral("\r\n") : QByteArrayLiteral("\r");
+                if (socket.write(QByteArrayLiteral("!1") + command + terminator) < 0)
+                    return false;
+                if (responseTimeoutMs <= 0)
+                    return true;
+                int readWaitedMs = 0;
+                while (!socket.waitForReadyRead(100)) {
+                    if (shouldInterrupt())
+                        return false;
+                    readWaitedMs += 100;
+                    if (readWaitedMs >= responseTimeoutMs)
+                        return false;
+                }
                 const QByteArray data = socket.readAll();
-                if (!data.isEmpty())
-                    processResponseData(data);
+                if (data.isEmpty())
+                    return false;
+                processResponseData(data);
+                return true;
             }
-            socket.disconnectFromHost();
-            return true;
-        }
 
-        const QByteArray frame = buildEiscpFrame(command);
-        socket.write(frame);
-        socket.flush();
+            const QByteArray frame = buildEiscpFrame(command);
+            if (socket.write(frame) < 0)
+                return false;
+            if (responseTimeoutMs <= 0)
+                return true;
 
-        if (parseResponse && responseTimeoutMs > 0) {
             QByteArray data;
             int readWaitedMs = 0;
             while (readWaitedMs < responseTimeoutMs) {
+                if (shouldInterrupt())
+                    return false;
                 if (socket.waitForReadyRead(100)) {
                     data.append(socket.readAll());
-                    while (socket.waitForReadyRead(50))
-                        data.append(socket.readAll());
+                    QElapsedTimer coalesceTimer;
+                    coalesceTimer.start();
+                    while (coalesceTimer.elapsed() < 120) {
+                        if (shouldInterrupt())
+                            return false;
+                        if (!socket.waitForReadyRead(10))
+                            break;
+                        const QByteArray chunk = socket.readAll();
+                        if (chunk.isEmpty())
+                            break;
+                        data.append(chunk);
+                    }
                     break;
                 }
                 readWaitedMs += 100;
             }
-            if (!data.isEmpty())
-                processResponseData(data);
+
+            if (data.isEmpty())
+                return false;
+            processResponseData(data);
+            return true;
+        };
+
+        QTcpSocket socket;
+        socket.setSocketOption(QAbstractSocket::KeepAliveOption, 1);
+        if (!connectSocket(socket)) {
+            if (interrupted)
+                return true;
+            markConnectFailure();
+            return false;
+        }
+
+        markConnectSuccess();
+        bool allSucceeded = true;
+        bool sawConnectFailure = false;
+
+        for (const QByteArray &command : commands) {
+            if (!m_started || m_stopping) {
+                allSucceeded = false;
+                break;
+            }
+            if (shouldInterrupt())
+                break;
+
+            bool commandSucceeded = sendQueryOnConnectedSocket(socket, command);
+            if (!commandSucceeded) {
+                if (interrupted)
+                    break;
+                socket.abort();
+                if (connectSocket(socket)) {
+                    if (interrupted)
+                        break;
+                    markConnectSuccess();
+                    commandSucceeded = sendQueryOnConnectedSocket(socket, command);
+                } else {
+                    if (!interrupted)
+                        sawConnectFailure = true;
+                }
+            }
+
+            if (!commandSucceeded) {
+                if (interrupted)
+                    break;
+                allSucceeded = false;
+                break;
+            }
+            if (shouldInterrupt())
+                break;
         }
 
         socket.disconnectFromHost();
-        return true;
+        if (socket.state() != QAbstractSocket::UnconnectedState) {
+            int disconnectWaitedMs = 0;
+            while (socket.state() != QAbstractSocket::UnconnectedState && disconnectWaitedMs < 300) {
+                socket.waitForDisconnected(50);
+                disconnectWaitedMs += 50;
+            }
+        }
+
+        if (sawConnectFailure && !interrupted)
+            markConnectFailure();
+
+        if (interrupted)
+            return true;
+        return allSucceeded;
     }
 
     v1::CmdStatus unavailableCommandStatus() const
     {
-        const std::int64_t now = nowMs();
-        const bool recentlySeen = m_lastSeenMs > 0 && (now - m_lastSeenMs) <= m_presenceTimeoutMs;
-        return recentlySeen ? v1::CmdStatus::Failure : v1::CmdStatus::TemporarilyOffline;
+        return v1::CmdStatus::TemporarilyOffline;
     }
 
     v1::Utf8String unavailableCommandMessage() const
     {
-        const std::int64_t now = nowMs();
-        const bool recentlySeen = m_lastSeenMs > 0 && (now - m_lastSeenMs) <= m_presenceTimeoutMs;
-        return recentlySeen ? v1::Utf8String("Command transport failed") : v1::Utf8String("Receiver unavailable");
+        return v1::Utf8String("Receiver unavailable");
     }
 
     void processResponseData(const QByteArray &data)
@@ -1270,17 +1793,15 @@ private:
             if (line.startsWith("PWR")) {
                 const QByteArray value = line.mid(3);
                 if (value == "01" || value == "00") {
-                    emitChannelState(QString::fromLatin1(kChannelPower), value == "01");
-                    markSeen();
-                }
+                    emitPowerState(value == "01");
+                    }
                 continue;
             }
 
             if (line.startsWith("AMT")) {
                 const QByteArray value = line.mid(3);
                 if (value == "01" || value == "00") {
-                    emitChannelState(QString::fromLatin1(kChannelMute), value == "01");
-                    markSeen();
+                    emitMuteState(value == "01");
                 }
                 continue;
             }
@@ -1292,8 +1813,7 @@ private:
                 if (ok) {
                     const int rawClamped = qBound(0, parsed, m_volumeMaxRaw);
                     const double normalized = (static_cast<double>(rawClamped) / m_volumeMaxRaw) * 100.0;
-                    emitChannelState(QString::fromLatin1(kChannelVolume), normalized);
-                    markSeen();
+                    emitVolumeState(static_cast<std::int64_t>(qRound(normalized)));
                 }
                 continue;
             }
@@ -1303,8 +1823,7 @@ private:
                 static const QRegularExpression kCodeRe(QStringLiteral("^[0-9A-F]{2}$"));
                 if (kCodeRe.match(code).hasMatch()) {
                     m_lastInputCode = code;
-                    emitChannelState(QString::fromLatin1(kChannelInput), m_lastInputCode.toStdString());
-                    markSeen();
+                    emitInputState(m_lastInputCode);
                 }
                 continue;
             }
@@ -1374,7 +1893,7 @@ private:
         volume.externalId = kChannelVolume;
         volume.name = "Volume";
         volume.kind = v1::ChannelKind::Volume;
-        volume.dataType = v1::ChannelDataType::Float;
+        volume.dataType = v1::ChannelDataType::Int;
         volume.flags = v1::ChannelFlag::Readable | v1::ChannelFlag::Writable | v1::ChannelFlag::Reportable;
         volume.minValue = 0.0;
         volume.maxValue = 100.0;
@@ -1453,50 +1972,31 @@ private:
         if (effectiveHosts().isEmpty() || m_controlPort == 0)
             return;
 
-        const std::vector<QByteArray> commands = {
+        static const std::array<QByteArray, 4> commands = {
             QByteArrayLiteral("PWRQSTN"),
-            QByteArrayLiteral("AMTQSTN"),
             QByteArrayLiteral("MVLQSTN"),
+            QByteArrayLiteral("AMTQSTN"),
             QByteArrayLiteral("SLIQSTN"),
         };
-        for (const QByteArray &cmd : commands)
-            sendIscpCommand(cmd, true, 800);
+        sendIscpPollBatch(commands, kPollQueryTimeoutMs);
     }
 
     void reloadInputLabelMap()
     {
-        m_inputLabelMap = buildInputLabelMap();
+        m_inputLabelMap.clear();
 
-        const QJsonValue activeCodesValue = m_meta.value(QStringLiteral("activeSliCodes"));
-        if (activeCodesValue.isArray()) {
-            const QJsonArray activeCodes = activeCodesValue.toArray();
-            for (const QJsonValue &entry : activeCodes) {
-                QString code;
-                if (entry.isString()) {
-                    code = normalizeSliCode(entry.toString());
-                } else if (entry.isDouble()) {
-                    code = normalizeSliCode(QString::number(entry.toInt()));
-                }
-                if (code.isEmpty())
-                    continue;
-                QString label = m_inputLabelMap.value(code);
-                if (label.isEmpty())
-                    label = QStringLiteral("SLI %1").arg(code);
-                m_inputLabelMap.insert(code, label);
-            }
-        }
-
-        for (auto it = m_meta.begin(); it != m_meta.end(); ++it) {
-            const QString key = it.key();
-            if (!key.startsWith(QLatin1String("inputLabel_")))
-                continue;
-            const QString code = normalizeSliCode(key.mid(11));
+        const QJsonArray activeCodes = normalizeActiveSliCodesArray(m_meta.value(QStringLiteral("activeSliCodes")));
+        for (const QJsonValue &entry : activeCodes) {
+            const QString code = normalizeSliCode(entry.toString());
             if (code.isEmpty())
                 continue;
-            QString label = it.value().toString().trimmed();
-            if (label.isEmpty())
-                label = QStringLiteral("SLI %1").arg(code);
-            m_inputLabelMap.insert(code, label);
+            const QString customLabel = m_meta.value(QStringLiteral("inputLabel_%1").arg(code)).toString().trimmed();
+            if (!customLabel.isEmpty()) {
+                m_inputLabelMap.insert(code, customLabel);
+                continue;
+            }
+            const QString defaultLabel = m_defaultInputLabelMap.value(code).trimmed();
+            m_inputLabelMap.insert(code, defaultLabel.isEmpty() ? QStringLiteral("SLI %1").arg(code) : defaultLabel);
         }
     }
 
@@ -1505,18 +2005,10 @@ private:
         if (m_connected == connected)
             return;
         m_connected = connected;
+        updatePollInterval();
         v1::Utf8String err;
         if (!sendConnectionStateChanged(m_connected, &err))
             std::cerr << "failed to send connectionStateChanged: " << err << '\n';
-    }
-
-    void markSeen()
-    {
-        m_lastSeenMs = nowMs();
-        if (!m_connected)
-            setConnected(true);
-        emitChannelState(QString::fromLatin1(kChannelConnectivity),
-                         static_cast<std::int64_t>(v1::ConnectivityStatus::Connected));
     }
 
     void emitChannelState(const QString &channelId, const v1::ScalarValue &value)
@@ -1526,6 +2018,64 @@ private:
         v1::Utf8String err;
         if (!sendChannelStateUpdated(m_deviceId, channelId.toStdString(), value, nowMs(), &err))
             std::cerr << "failed to send channel state for " << channelId.toStdString() << ": " << err << '\n';
+    }
+
+    void emitPowerState(bool value)
+    {
+        m_powerState = value ? PowerState::On : PowerState::Off;
+        if (m_lastReportedPower.has_value() && m_lastReportedPower.value() == value)
+            return;
+        m_lastReportedPower = value;
+        emitChannelState(QString::fromLatin1(kChannelPower), value);
+    }
+
+    void emitMuteState(bool value)
+    {
+        if (m_lastReportedMute.has_value() && m_lastReportedMute.value() == value)
+            return;
+        m_lastReportedMute = value;
+        emitChannelState(QString::fromLatin1(kChannelMute), value);
+    }
+
+    void emitVolumeState(std::int64_t value)
+    {
+        if (m_lastReportedVolume.has_value() && m_lastReportedVolume.value() == value)
+            return;
+        m_lastReportedVolume = value;
+        emitChannelState(QString::fromLatin1(kChannelVolume), value);
+    }
+
+    void emitInputState(const QString &value)
+    {
+        if (m_hasLastReportedInput && m_lastReportedInput == value)
+            return;
+        m_lastReportedInput = value;
+        m_hasLastReportedInput = true;
+        emitChannelState(QString::fromLatin1(kChannelInput), value.toStdString());
+    }
+
+    void submitCmdResult(v1::CmdResponse response, const char *context)
+    {
+        trace(QStringLiteral("result cmd context=%1 id=%2 status=%3 err=%4")
+                  .arg(QString::fromLatin1(context))
+                  .arg(response.id)
+                  .arg(static_cast<int>(response.status))
+                  .arg(QString::fromStdString(response.error)));
+        v1::Utf8String err;
+        if (!sendResult(response, &err))
+            std::cerr << "failed to send " << context << " result: " << err << '\n';
+    }
+
+    void submitActionResult(v1::ActionResponse response, const char *context)
+    {
+        trace(QStringLiteral("result action context=%1 id=%2 status=%3 err=%4")
+                  .arg(QString::fromLatin1(context))
+                  .arg(response.id)
+                  .arg(static_cast<int>(response.status))
+                  .arg(QString::fromStdString(response.error)));
+        v1::Utf8String err;
+        if (!sendResult(response, &err))
+            std::cerr << "failed to send " << context << " result: " << err << '\n';
     }
 
     v1::Adapter m_info;
@@ -1538,33 +2088,195 @@ private:
 
     std::string m_deviceId;
     std::uint16_t m_controlPort = 0;
-    int m_presenceTimeoutMs = 15000;
     int m_pollIntervalMs = 5000;
     int m_retryIntervalMs = 10000;
     int m_volumeMaxRaw = 160;
 
-    std::int64_t m_nextPollDueMs = 0;
-    std::int64_t m_lastSeenMs = 0;
-    std::int64_t m_lastConnectAttemptMs = 0;
     std::int64_t m_lastConnectLogMs = 0;
 
     QString m_lastConnectError;
     QString m_lastInputCode;
+    std::optional<bool> m_lastReportedPower;
+    std::optional<bool> m_lastReportedMute;
+    std::optional<std::int64_t> m_lastReportedVolume;
+    QString m_lastReportedInput;
+    bool m_hasLastReportedInput = false;
+    int m_consecutiveConnectFailures = 0;
+    PowerState m_powerState = PowerState::Unknown;
+    QHash<QString, QString> m_defaultInputLabelMap;
     QHash<QString, QString> m_inputLabelMap;
+    std::deque<PendingOperation> m_operationQueue;
+    bool m_operationRunning = false;
+    bool m_queuePumpScheduled = false;
+    bool m_pollQueued = false;
+
+    std::unique_ptr<QTimer> m_pollTimer;
 };
 
 class OnkyoIpcFactory final : public sdk::AdapterFactory
 {
-public:
+protected:
+    void onBootstrap(const sdk::BootstrapRequest &request) override
+    {
+        m_schemaInputLabels = loadConfiguredSliLabels(parseJsonObject(request.staticConfigJson));
+    }
+
+    void onFactoryConfigChanged(const sdk::ConfigChangedRequest &request) override
+    {
+        (void)request;
+    }
+
     v1::Utf8String pluginType() const override
     {
         return kPluginType;
     }
 
-    std::unique_ptr<sdk::AdapterSidecar> create() const override
+    v1::Utf8String displayName() const override
     {
-        return std::make_unique<OnkyoIpcSidecar>();
+        return "Onkyo / Pioneer";
     }
+
+    v1::Utf8String description() const override
+    {
+        return "Onkyo/Pioneer AVR adapter (ISCP sidecar)";
+    }
+
+    v1::Utf8String apiVersion() const override
+    {
+        return "1.0.0";
+    }
+
+    v1::Utf8String iconSvg() const override
+    {
+        return kOnkyoIconSvg;
+    }
+
+    int timeoutMs() const override
+    {
+        return 15000;
+    }
+
+    int maxInstances() const override
+    {
+        return 0;
+    }
+
+    v1::AdapterCapabilities capabilities() const override
+    {
+        v1::AdapterCapabilities caps;
+        caps.required = v1::AdapterRequirement::Host | v1::AdapterRequirement::Port;
+        caps.optional = v1::AdapterRequirement::UsesRetryInterval;
+        caps.flags = v1::AdapterFlag::None;
+
+        v1::AdapterActionDescriptor probe;
+        probe.id = "probe";
+        probe.label = "Test connection";
+        probe.description = "Validate receiver reachability using the current config values.";
+        probe.hasForm = false;
+        probe.metaJson = R"({"placement":"card","kind":"command","requiresAck":true})";
+        caps.factoryActions.push_back(probe);
+
+        v1::AdapterActionDescriptor settings;
+        settings.id = "settings";
+        settings.label = "Settings";
+        settings.description = "Update adapter settings.";
+        settings.hasForm = true;
+        settings.metaJson = R"({"placement":"card","kind":"open_dialog","requiresAck":true})";
+        caps.instanceActions.push_back(settings);
+
+        v1::AdapterActionDescriptor probeCurrent;
+        probeCurrent.id = "probeCurrentInput";
+        probeCurrent.label = "Probe current";
+        probeCurrent.description = "Probe current input and refresh labels.";
+        probeCurrent.hasForm = false;
+        probeCurrent.metaJson = R"({"placement":"form_field","kind":"command","requiresAck":true})";
+        caps.instanceActions.push_back(probeCurrent);
+
+        return caps;
+    }
+
+    v1::JsonText configSchemaJson() const override
+    {
+        return toJson(buildConfigSchemaObject(m_schemaInputLabels));
+    }
+
+    std::unique_ptr<sdk::InstanceExecutionBackend> createInstanceExecutionBackend(
+        const sdk::ExternalId &externalId) override
+    {
+        (void)externalId;
+        return sdk::qt::createInstanceExecutionBackend();
+    }
+
+    std::unique_ptr<sdk::AdapterInstance> createInstance(const sdk::ExternalId &externalId) override
+    {
+        std::cerr << "create onkyo instance externalId=" << externalId << '\n';
+        return std::make_unique<OnkyoIpcInstance>(m_schemaInputLabels);
+    }
+
+    void onFactoryActionInvoke(const sdk::AdapterActionInvokeRequest &request) override
+    {
+        submitFactoryActionResult(handleFactoryActionInvoke(request), "factory.action.invoke");
+    }
+
+private:
+    v1::ActionResponse handleFactoryActionInvoke(const sdk::AdapterActionInvokeRequest &request)
+    {
+        trace(QStringLiteral("factory action invoke id=%1 action=%2")
+                  .arg(request.cmdId)
+                  .arg(QString::fromStdString(request.actionId)));
+        v1::ActionResponse resp;
+        resp.id = request.cmdId;
+        resp.tsMs = nowMs();
+
+        if (request.actionId != "probe") {
+            resp.status = v1::CmdStatus::NotSupported;
+            resp.error = "Factory action not supported";
+            return resp;
+        }
+
+        const QJsonObject params = parseJsonObject(request.paramsJson);
+        const QStringList hosts = resolveProbeHosts(params);
+        const std::uint16_t port = resolveProbePort(params);
+        if (hosts.isEmpty() || port == 0) {
+            resp.status = v1::CmdStatus::InvalidArgument;
+            resp.error = "Probe requires host/ip and iscpPort";
+            return resp;
+        }
+
+        QString errorMessage;
+        QString successfulHost;
+        for (const QString &host : hosts) {
+            QString hostError;
+            if (probeEndpoint(host, port, &hostError)) {
+                successfulHost = host;
+                break;
+            }
+            if (!hostError.isEmpty())
+                errorMessage = QStringLiteral("%1 (%2:%3)").arg(hostError, host).arg(port);
+        }
+
+        if (!successfulHost.isEmpty()) {
+            resp.status = v1::CmdStatus::Success;
+            resp.resultType = v1::ActionResultType::String;
+            resp.resultValue = QStringLiteral("%1:%2").arg(successfulHost).arg(port).toStdString();
+        } else {
+            resp.status = v1::CmdStatus::Failure;
+            resp.error = errorMessage.isEmpty()
+                ? QStringLiteral("Receiver unavailable").toStdString()
+                : errorMessage.toStdString();
+            resp.errorContext = "factory.action";
+        }
+        return resp;
+    }
+
+    void submitFactoryActionResult(v1::ActionResponse response, const char *context)
+    {
+        v1::Utf8String err;
+        if (!sendResult(response, &err))
+            std::cerr << "failed to send " << context << " result: " << err << '\n';
+    }
+
+    QHash<QString, QString> m_schemaInputLabels;
 };
 
 } // namespace
@@ -1598,8 +2310,6 @@ int main(int argc, char **argv)
             std::cerr << "poll failed: " << error << '\n';
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
         }
-        if (auto *adapter = dynamic_cast<OnkyoIpcSidecar *>(host.adapter()))
-            adapter->tick();
         QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
     }
 
