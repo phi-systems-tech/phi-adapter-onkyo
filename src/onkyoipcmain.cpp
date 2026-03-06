@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <variant>
 #include <vector>
 
@@ -55,8 +56,9 @@ constexpr const char kOnkyoIconSvg[] =
 constexpr bool kUseEiscp = true;
 constexpr bool kUseCrlf = false;
 constexpr bool kTraceEnabled = false;
+constexpr bool kTimingLogsEnabled = true;
 constexpr int kPollQueryTimeoutMs = 500;
-constexpr int kConnectFailuresBeforeDisconnect = 2;
+constexpr int kConnectFailuresBeforeDisconnect = 3;
 
 std::atomic_bool g_running{true};
 
@@ -75,6 +77,13 @@ void trace(const QString &message)
     if (!kTraceEnabled)
         return;
     std::cerr << "[" << nowMs() << "] onkyo-ipc: " << message.toStdString() << '\n';
+}
+
+void timingLog(const QString &message)
+{
+    if (!kTimingLogsEnabled)
+        return;
+    std::cerr << "[" << nowMs() << "] onkyo-ipc[timing]: " << message.toStdString() << '\n';
 }
 
 std::string toJson(const QJsonObject &obj)
@@ -258,6 +267,26 @@ std::optional<double> scalarToDouble(const v1::ScalarValue &value)
     return std::nullopt;
 }
 
+QString scalarToDebugString(const v1::ScalarValue &value)
+{
+    return std::visit(
+        [](const auto &entry) -> QString {
+            using T = std::decay_t<decltype(entry)>;
+            if constexpr (std::is_same_v<T, std::monostate>) {
+                return QStringLiteral("null");
+            } else if constexpr (std::is_same_v<T, bool>) {
+                return entry ? QStringLiteral("true") : QStringLiteral("false");
+            } else if constexpr (std::is_same_v<T, std::int64_t>) {
+                return QString::number(entry);
+            } else if constexpr (std::is_same_v<T, double>) {
+                return QString::number(entry, 'f', 6);
+            } else {
+                return QString::fromStdString(entry);
+            }
+        },
+        value);
+}
+
 std::optional<bool> scalarToBool(const v1::ScalarValue &value)
 {
     if (const auto *v = std::get_if<bool>(&value))
@@ -343,10 +372,16 @@ bool probeEndpoint(const QString &host, std::uint16_t port, QString *errorMessag
 {
     QElapsedTimer timer;
     timer.start();
+    timingLog(QStringLiteral("factory.probe.start host=%1 port=%2").arg(host).arg(port));
     trace(QStringLiteral("factory probe start host=%1 port=%2").arg(host).arg(port));
     QTcpSocket socket;
     socket.connectToHost(host, port);
     if (!socket.waitForConnected(900)) {
+        timingLog(QStringLiteral("factory.probe.end status=failure host=%1 port=%2 elapsedMs=%3 error=%4")
+                      .arg(host)
+                      .arg(port)
+                      .arg(timer.elapsed())
+                      .arg(socket.errorString()));
         trace(QStringLiteral("factory probe failed host=%1 port=%2 elapsedMs=%3 error=%4")
                   .arg(host)
                   .arg(port)
@@ -356,6 +391,10 @@ bool probeEndpoint(const QString &host, std::uint16_t port, QString *errorMessag
             *errorMessage = socket.errorString();
         return false;
     }
+    timingLog(QStringLiteral("factory.probe.end status=success host=%1 port=%2 elapsedMs=%3")
+                  .arg(host)
+                  .arg(port)
+                  .arg(timer.elapsed()));
     trace(QStringLiteral("factory probe ok host=%1 port=%2 elapsedMs=%3")
               .arg(host)
               .arg(port)
@@ -702,11 +741,21 @@ protected:
 
     void onChannelInvoke(const sdk::ChannelInvokeRequest &request) override
     {
+        timingLog(QStringLiteral("cmd.recv type=channel.invoke cmdId=%1 externalId=%2 device=%3 channel=%4 value=%5")
+                      .arg(request.cmdId)
+                      .arg(QString::fromStdString(request.externalId))
+                      .arg(QString::fromStdString(request.deviceExternalId))
+                      .arg(QString::fromStdString(request.channelExternalId))
+                      .arg(scalarToDebugString(request.value)));
         enqueueChannelInvokeOperation(request);
     }
 
     void onAdapterActionInvoke(const sdk::AdapterActionInvokeRequest &request) override
     {
+        timingLog(QStringLiteral("cmd.recv type=adapter.action.invoke cmdId=%1 externalId=%2 action=%3")
+                      .arg(request.cmdId)
+                      .arg(QString::fromStdString(request.externalId))
+                      .arg(QString::fromStdString(request.actionId)));
         if (request.actionId == "probeCurrentInput") {
             enqueueProbeCurrentOperation(request);
             return;
@@ -746,6 +795,7 @@ private:
 
         Kind kind = Kind::Poll;
         bool pollWasRunning = false;
+        std::int64_t enqueuedMs = 0;
         sdk::ChannelInvokeRequest channelRequest;
         sdk::AdapterActionInvokeRequest actionRequest;
     };
@@ -786,8 +836,12 @@ private:
 
         PendingOperation op;
         op.kind = PendingOperation::Kind::ChannelInvoke;
+        op.enqueuedMs = nowMs();
         op.channelRequest = request;
         m_operationQueue.push_back(std::move(op));
+        timingLog(QStringLiteral("cmd.queue type=channel.invoke cmdId=%1 queueSize=%2")
+                      .arg(request.cmdId)
+                      .arg(static_cast<int>(m_operationQueue.size())));
         scheduleQueuePump();
     }
 
@@ -796,8 +850,13 @@ private:
         PendingOperation op;
         op.kind = PendingOperation::Kind::ProbeCurrentInput;
         op.pollWasRunning = m_pollRunning;
+        op.enqueuedMs = nowMs();
         op.actionRequest = request;
         m_operationQueue.push_front(std::move(op));
+        timingLog(QStringLiteral("cmd.queue type=adapter.action.invoke cmdId=%1 action=%2 queueSize=%3")
+                      .arg(request.cmdId)
+                      .arg(QString::fromStdString(request.actionId))
+                      .arg(static_cast<int>(m_operationQueue.size())));
         scheduleQueuePump();
     }
 
@@ -811,6 +870,7 @@ private:
 
         PendingOperation op;
         op.kind = PendingOperation::Kind::Poll;
+        op.enqueuedMs = nowMs();
         if (prioritize)
             m_operationQueue.push_front(std::move(op));
         else
@@ -842,16 +902,28 @@ private:
         m_operationQueue.pop_front();
         if (op.kind == PendingOperation::Kind::Poll)
             m_pollQueued = false;
+        const std::int64_t startedMs = nowMs();
+        const std::int64_t waitMs = (op.enqueuedMs > 0) ? (startedMs - op.enqueuedMs) : -1;
 
         switch (op.kind) {
         case PendingOperation::Kind::Poll:
+            timingLog(QStringLiteral("cmd.start type=poll waitMs=%1 queueSize=%2")
+                          .arg(waitMs)
+                          .arg(static_cast<int>(m_operationQueue.size())));
             m_pollRunning = true;
             if (m_started && !m_stopping)
                 requestInitialState();
             m_pollRunning = false;
             resetPollTimerCountdown();
+            timingLog(QStringLiteral("cmd.end type=poll durationMs=%1")
+                          .arg(nowMs() - startedMs));
             break;
         case PendingOperation::Kind::ChannelInvoke: {
+            timingLog(QStringLiteral("cmd.start type=channel.invoke cmdId=%1 channel=%2 waitMs=%3 queueSize=%4")
+                          .arg(op.channelRequest.cmdId)
+                          .arg(QString::fromStdString(op.channelRequest.channelExternalId))
+                          .arg(waitMs)
+                          .arg(static_cast<int>(m_operationQueue.size())));
             v1::CmdResponse response = handleChannelInvoke(op.channelRequest);
             const bool isPowerInvoke = (op.channelRequest.channelExternalId == kChannelPower);
             const bool cmdSuccess = (response.status == v1::CmdStatus::Success);
@@ -863,12 +935,24 @@ private:
                         enqueuePollOperation(true);
                 });
             }
+            timingLog(QStringLiteral("cmd.end type=channel.invoke cmdId=%1 durationMs=%2")
+                          .arg(op.channelRequest.cmdId)
+                          .arg(nowMs() - startedMs));
             break;
         }
         case PendingOperation::Kind::ProbeCurrentInput: {
+            timingLog(QStringLiteral("cmd.start type=adapter.action.invoke cmdId=%1 action=%2 waitMs=%3 queueSize=%4")
+                          .arg(op.actionRequest.cmdId)
+                          .arg(QString::fromStdString(op.actionRequest.actionId))
+                          .arg(waitMs)
+                          .arg(static_cast<int>(m_operationQueue.size())));
             v1::ActionResponse response =
                 handleProbeCurrentInput(op.actionRequest, op.pollWasRunning);
             submitActionResult(std::move(response), "adapter.action.invoke");
+            timingLog(QStringLiteral("cmd.end type=adapter.action.invoke cmdId=%1 action=%2 durationMs=%3")
+                          .arg(op.actionRequest.cmdId)
+                          .arg(QString::fromStdString(op.actionRequest.actionId))
+                          .arg(nowMs() - startedMs));
             break;
         }
         }
@@ -1416,6 +1500,14 @@ private:
                       .arg(m_controlPort));
             return false;
         }
+        timingLog(QStringLiteral("iscp.start cmd=%1 parseResponse=%2 responseTimeoutMs=%3 connectTimeoutMs=%4 attempts=%5 hostCount=%6 port=%7")
+                      .arg(QString::fromLatin1(command))
+                      .arg(parseResponse ? 1 : 0)
+                      .arg(responseTimeoutMs)
+                      .arg(connectTimeoutMs)
+                      .arg(maxAttempts)
+                      .arg(hostCandidates.size())
+                      .arg(m_controlPort));
         trace(QStringLiteral("iscp start cmd=%1 parseResponse=%2 responseTimeoutMs=%3 hosts=%4 port=%5")
                   .arg(QString::fromLatin1(command))
                   .arg(parseResponse ? 1 : 0)
@@ -1434,6 +1526,11 @@ private:
                 while (!socket.waitForConnected(100)) {
                     waitedMs += 100;
                     if (waitedMs >= connectTimeoutMs) {
+                        timingLog(QStringLiteral("iscp.connect.timeout cmd=%1 host=%2 waitedMs=%3 err=%4")
+                                      .arg(QString::fromLatin1(command))
+                                      .arg(host)
+                                      .arg(waitedMs)
+                                      .arg(socket.errorString()));
                         if (socket.state() != QAbstractSocket::ConnectedState)
                             logConnectFailure(socket.errorString(), host);
                         break;
@@ -1441,6 +1538,10 @@ private:
                 }
                 if (socket.state() == QAbstractSocket::ConnectedState) {
                     connectedHost = host;
+                    timingLog(QStringLiteral("iscp.connect.ok cmd=%1 host=%2 elapsedMs=%3")
+                                  .arg(QString::fromLatin1(command))
+                                  .arg(host)
+                                  .arg(connectTimer.elapsed()));
                     trace(QStringLiteral("iscp connected cmd=%1 host=%2 port=%3 connectElapsedMs=%4")
                               .arg(QString::fromLatin1(command))
                               .arg(host)
@@ -1469,12 +1570,16 @@ private:
                           .arg(totalTimer.elapsed()));
 
                 if (parseResponse && responseTimeoutMs > 0) {
-                    if (!socket.waitForReadyRead(responseTimeoutMs))
-                        return false;
-                    const QByteArray data = socket.readAll();
-                    if (data.isEmpty())
-                        return false;
-                    processResponseData(data);
+                if (!socket.waitForReadyRead(responseTimeoutMs))
+                    return false;
+                const QByteArray data = socket.readAll();
+                timingLog(QStringLiteral("iscp.read cmd=%1 bytes=%2 elapsedMs=%3")
+                              .arg(QString::fromLatin1(command))
+                              .arg(data.size())
+                              .arg(totalTimer.elapsed()));
+                if (data.isEmpty())
+                    return false;
+                processResponseData(data);
                 }
                 return true;
             }
@@ -1533,6 +1638,11 @@ private:
                       .arg(QString::fromLatin1(command))
                       .arg(readWaitedMs)
                       .arg(data.size()));
+            timingLog(QStringLiteral("iscp.read cmd=%1 readWaitedMs=%2 bytes=%3 elapsedMs=%4")
+                          .arg(QString::fromLatin1(command))
+                          .arg(readWaitedMs)
+                          .arg(data.size())
+                          .arg(totalTimer.elapsed()));
             if (data.isEmpty())
                 return false;
 
@@ -1570,6 +1680,10 @@ private:
                       .arg(totalTimer.elapsed()));
 
             if (ok) {
+                timingLog(QStringLiteral("iscp.done cmd=%1 status=success elapsedMs=%2 attempt=%3")
+                              .arg(QString::fromLatin1(command))
+                              .arg(totalTimer.elapsed())
+                              .arg(attempt + 1));
                 trace(QStringLiteral("iscp done cmd=%1 elapsedMs=%2 attempt=%3")
                           .arg(QString::fromLatin1(command))
                           .arg(totalTimer.elapsed())
@@ -1580,6 +1694,9 @@ private:
 
         if (!hadConnectedSession)
             markConnectFailure();
+        timingLog(QStringLiteral("iscp.done cmd=%1 status=failure elapsedMs=%2")
+                      .arg(QString::fromLatin1(command))
+                      .arg(totalTimer.elapsed()));
         trace(QStringLiteral("iscp failed cmd=%1 totalElapsedMs=%2")
                   .arg(QString::fromLatin1(command))
                   .arg(totalTimer.elapsed()));
@@ -1593,6 +1710,12 @@ private:
         const QStringList hostCandidates = effectiveHosts();
         if (hostCandidates.isEmpty() || m_controlPort == 0)
             return false;
+        const std::int64_t pollStartMs = nowMs();
+        timingLog(QStringLiteral("poll.batch.start hostCount=%1 port=%2 responseTimeoutMs=%3 queueSize=%4")
+                      .arg(hostCandidates.size())
+                      .arg(m_controlPort)
+                      .arg(responseTimeoutMs)
+                      .arg(static_cast<int>(m_operationQueue.size())));
         bool interrupted = false;
         auto shouldInterrupt = [&]() -> bool {
             if (hasQueuedPriorityWork()) {
@@ -1745,8 +1868,13 @@ private:
         if (sawConnectFailure && !interrupted)
             markConnectFailure();
 
-        if (interrupted)
+        if (interrupted) {
+            timingLog(QStringLiteral("poll.batch.end status=interrupted elapsedMs=%1").arg(nowMs() - pollStartMs));
             return true;
+        }
+        timingLog(QStringLiteral("poll.batch.end status=%1 elapsedMs=%2")
+                      .arg(allSucceeded ? QStringLiteral("success") : QStringLiteral("failure"))
+                      .arg(nowMs() - pollStartMs));
         return allSucceeded;
     }
 
@@ -2088,6 +2216,11 @@ private:
 
     void submitCmdResult(v1::CmdResponse response, const char *context)
     {
+        timingLog(QStringLiteral("cmd.result.send context=%1 cmdId=%2 status=%3 error=%4")
+                      .arg(QString::fromLatin1(context))
+                      .arg(response.id)
+                      .arg(static_cast<int>(response.status))
+                      .arg(QString::fromStdString(response.error)));
         trace(QStringLiteral("result cmd context=%1 id=%2 status=%3 err=%4")
                   .arg(QString::fromLatin1(context))
                   .arg(response.id)
@@ -2100,6 +2233,11 @@ private:
 
     void submitActionResult(v1::ActionResponse response, const char *context)
     {
+        timingLog(QStringLiteral("action.result.send context=%1 cmdId=%2 status=%3 error=%4")
+                      .arg(QString::fromLatin1(context))
+                      .arg(response.id)
+                      .arg(static_cast<int>(response.status))
+                      .arg(QString::fromStdString(response.error)));
         trace(QStringLiteral("result action context=%1 id=%2 status=%3 err=%4")
                   .arg(QString::fromLatin1(context))
                   .arg(response.id)
@@ -2186,7 +2324,7 @@ protected:
 
     int timeoutMs() const override
     {
-        return 15000;
+        return 20000;
     }
 
     int maxInstances() const override
