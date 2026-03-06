@@ -62,6 +62,53 @@ Provides local network command/control integration for Onkyo/Pioneer receivers.
   - `activeSliCodes`
   - `currentInputCode` (read-only helper, populated by `probeCurrentInput`)
 
+### Runtime State Machine
+
+The adapter runs as a single sidecar process with one worker thread per instance.
+
+- `Stopped`
+  - Instance is not running.
+  - No polling is active.
+  - Pending queued operations are flushed with failure.
+
+- `Running + Disconnected`
+  - `connected=false`
+  - Poll timer uses `retryIntervalMs`.
+  - Poll tries to establish TCP connectivity and query receiver state.
+  - After repeated connect failures, connectivity remains disconnected.
+
+- `Running + Connected`
+  - `connected=true`
+  - Poll timer uses `pollIntervalMs`.
+  - Poll queries `PWRQSTN`, `MVLQSTN`, `AMTQSTN`, `SLIQSTN` in one session.
+  - Channel updates are emitted only on value changes (deduped).
+
+- `Poll preemption`
+  - Poll is background work.
+  - If prioritized work is queued (`channel invoke` or instance action), poll exits early.
+  - This keeps write/actions responsive.
+
+- `Power state`
+  - Internal power cache: `Unknown | Off | On`.
+  - Updated from ISCP responses.
+  - Reset to `Unknown` when connectivity is lost.
+
+- `Channel invoke`
+  - Enqueued with priority over poll.
+  - Successful non-power write schedules a near-term refresh poll.
+  - Volume writes are coalesced in queue.
+
+- `probeCurrentInput` action
+  - If probe was requested while poll was already running:
+    - No extra TCP query is started.
+    - Result is returned from the last poll-resolved input code.
+  - If poll was not running:
+    - Explicit `SLIQSTN` query is sent (with retry).
+  - On success:
+    - `activeSliCodes` is patched with discovered code.
+    - Missing/default input label can be patched from configured defaults.
+    - Action result returns updated form values/choices and requests layout reload.
+
 ### Build
 
 ```bash

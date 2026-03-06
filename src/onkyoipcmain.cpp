@@ -137,14 +137,12 @@ QString normalizeSliCode(QString raw)
 QString formatSliDisplayLabel(const QString &code, const QString &mappedLabel)
 {
     const QString normalizedCode = normalizeSliCode(code);
-    if (normalizedCode.isEmpty())
-        return mappedLabel.trimmed();
     const QString label = mappedLabel.trimmed();
-    if (label.isEmpty())
-        return QStringLiteral("SLI %1").arg(normalizedCode);
-    if (label.startsWith(QLatin1String("SLI"), Qt::CaseInsensitive))
+    if (!label.isEmpty())
         return label;
-    return QStringLiteral("SLI %1 - %2").arg(normalizedCode, label);
+    if (normalizedCode.isEmpty())
+        return QString();
+    return QStringLiteral("SLI %1").arg(normalizedCode);
 }
 
 QJsonArray normalizeActiveSliCodesArray(const QJsonValue &value)
@@ -588,6 +586,7 @@ protected:
         m_operationRunning = false;
         m_queuePumpScheduled = false;
         m_pollQueued = false;
+        m_pollRunning = false;
         m_started = true;
         m_stopping = false;
         m_synced = false;
@@ -620,6 +619,7 @@ protected:
         m_hasLastReportedInput = false;
         m_powerState = PowerState::Unknown;
         m_consecutiveConnectFailures = 0;
+        m_pollRunning = false;
         flushPendingOperations("Instance stopped");
         setConnected(false);
         stopPollingTimer();
@@ -668,6 +668,7 @@ protected:
         m_consecutiveConnectFailures = 0;
         m_stopping = false;
         m_started = true;
+        m_pollRunning = false;
         flushPendingOperations("Config changed");
 
         if (endpointChanged || !wasConnected)
@@ -693,6 +694,7 @@ protected:
         m_hasLastReportedInput = false;
         m_powerState = PowerState::Unknown;
         m_consecutiveConnectFailures = 0;
+        m_pollRunning = false;
         flushPendingOperations("Instance disconnected");
         setConnected(false);
         stopPollingTimer();
@@ -743,6 +745,7 @@ private:
         };
 
         Kind kind = Kind::Poll;
+        bool pollWasRunning = false;
         sdk::ChannelInvokeRequest channelRequest;
         sdk::AdapterActionInvokeRequest actionRequest;
     };
@@ -792,6 +795,7 @@ private:
     {
         PendingOperation op;
         op.kind = PendingOperation::Kind::ProbeCurrentInput;
+        op.pollWasRunning = m_pollRunning;
         op.actionRequest = request;
         m_operationQueue.push_front(std::move(op));
         scheduleQueuePump();
@@ -841,8 +845,10 @@ private:
 
         switch (op.kind) {
         case PendingOperation::Kind::Poll:
+            m_pollRunning = true;
             if (m_started && !m_stopping)
                 requestInitialState();
+            m_pollRunning = false;
             resetPollTimerCountdown();
             break;
         case PendingOperation::Kind::ChannelInvoke: {
@@ -860,7 +866,8 @@ private:
             break;
         }
         case PendingOperation::Kind::ProbeCurrentInput: {
-            v1::ActionResponse response = handleAdapterActionInvoke(op.actionRequest);
+            v1::ActionResponse response =
+                handleProbeCurrentInput(op.actionRequest, op.pollWasRunning);
             submitActionResult(std::move(response), "adapter.action.invoke");
             break;
         }
@@ -1107,17 +1114,26 @@ private:
             return resp;
         }
 
-        if (request.actionId == "probeCurrentInput") {
-            const QString before = m_lastInputCode;
-            QString resolvedCode;
-            if (!sendIscpCommand(QByteArrayLiteral("SLIQSTN"),
-                                 true,
-                                 700,
-                                 900,
-                                 1)) {
-                resp.status = unavailableCommandStatus();
-                resp.error = unavailableCommandMessage();
-            } else if (!m_lastInputCode.isEmpty()) {
+        if (request.actionId == "probeCurrentInput")
+            return handleProbeCurrentInput(request, false);
+
+        resp.status = v1::CmdStatus::NotSupported;
+        resp.error = "Adapter action not supported";
+        return resp;
+    }
+
+    v1::ActionResponse handleProbeCurrentInput(const sdk::AdapterActionInvokeRequest &request,
+                                               bool fromRunningPoll)
+    {
+        v1::ActionResponse resp;
+        resp.id = request.cmdId;
+        resp.tsMs = nowMs();
+        const QString before = m_lastInputCode;
+        QString resolvedCode;
+
+        // If probe was triggered while a poll was already running, return poll result only.
+        if (fromRunningPoll) {
+            if (!m_lastInputCode.isEmpty()) {
                 resp.status = v1::CmdStatus::Success;
                 resp.resultType = v1::ActionResultType::String;
                 resp.resultValue = m_lastInputCode.toStdString();
@@ -1131,73 +1147,89 @@ private:
                 resp.status = v1::CmdStatus::Failure;
                 resp.error = "No input reported";
             }
-
-            if (!resolvedCode.isEmpty()) {
-                const QString normalized = normalizeSliCode(resolvedCode);
-
-                QSet<QString> activeCodes;
-                const QJsonValue activeValue = m_meta.value(QStringLiteral("activeSliCodes"));
-                if (activeValue.isArray()) {
-                    const QJsonArray activeArray = activeValue.toArray();
-                    for (const QJsonValue &entry : activeArray) {
-                        QString code;
-                        if (entry.isString()) {
-                            code = normalizeSliCode(entry.toString());
-                        } else if (entry.isDouble()) {
-                            code = normalizeSliCode(QString::number(entry.toInt()));
-                        }
-                        if (!code.isEmpty())
-                            activeCodes.insert(code);
-                    }
-                }
-                activeCodes.insert(normalized);
-
-                QJsonArray nextActive;
-                for (const QString &code : std::as_const(activeCodes))
-                    nextActive.append(code);
-
-                QJsonObject patch;
-                patch.insert(QStringLiteral("activeSliCodes"), nextActive);
-                const QString labelKey = QStringLiteral("inputLabel_%1").arg(normalized);
-                const QString existingLabel = m_meta.value(labelKey).toString().trimmed();
-                const QString defaultLabel = m_defaultInputLabelMap.value(normalized).trimmed();
-                const QString fallbackLabel = QStringLiteral("SLI %1").arg(normalized);
-                const auto isGenericSliLabel = [&normalized](const QString &label) {
-                    QString compact = label.trimmed();
-                    compact.remove(QLatin1Char(' '));
-                    return compact.compare(QStringLiteral("SLI%1").arg(normalized), Qt::CaseInsensitive) == 0;
-                };
-                if (existingLabel.isEmpty()) {
-                    patch.insert(labelKey, defaultLabel.isEmpty() ? fallbackLabel : defaultLabel);
-                } else if (!defaultLabel.isEmpty()
-                           && isGenericSliLabel(existingLabel)) {
-                    // Repair old generic fallback labels once a known default exists.
-                    patch.insert(labelKey, defaultLabel);
-                }
-
-                for (auto it = patch.begin(); it != patch.end(); ++it)
-                    m_meta.insert(it.key(), it.value());
-                m_info.metaJson = toJson(m_meta);
-                applyConfig();
-
-                resp.formValuesJson = toJson(QJsonObject{
-                    {QStringLiteral("activeSliCodes"), nextActive},
-                    {QStringLiteral("currentInputCode"), normalized},
-                });
-                resp.fieldChoicesJson = toJson(QJsonObject{
-                    {QStringLiteral("activeSliCodes"), optionsToChoiceJson(inputChoicesForChannel())},
-                });
-                resp.reloadLayout = true;
-
-                v1::Utf8String err;
-                if (!sendAdapterMetaUpdated(toJson(patch), &err))
-                    std::cerr << "failed to send adapterMetaUpdated(probeCurrentInput): " << err << '\n';
-            }
-            return resp;
+        } else if (!sendIscpCommand(QByteArrayLiteral("SLIQSTN"),
+                                    true,
+                                    700,
+                                    900,
+                                    2)) {
+            resp.status = unavailableCommandStatus();
+            resp.error = unavailableCommandMessage();
+        } else if (!m_lastInputCode.isEmpty()) {
+            resp.status = v1::CmdStatus::Success;
+            resp.resultType = v1::ActionResultType::String;
+            resp.resultValue = m_lastInputCode.toStdString();
+            resolvedCode = m_lastInputCode;
+        } else if (!before.isEmpty()) {
+            resp.status = v1::CmdStatus::Success;
+            resp.resultType = v1::ActionResultType::String;
+            resp.resultValue = before.toStdString();
+            resolvedCode = before;
+        } else {
+            resp.status = v1::CmdStatus::Failure;
+            resp.error = "No input reported";
         }
 
-        resp.status = v1::CmdStatus::NotSupported;
-        resp.error = "Adapter action not supported";
+        if (!resolvedCode.isEmpty()) {
+            const QString normalized = normalizeSliCode(resolvedCode);
+
+            QSet<QString> activeCodes;
+            const QJsonValue activeValue = m_meta.value(QStringLiteral("activeSliCodes"));
+            if (activeValue.isArray()) {
+                const QJsonArray activeArray = activeValue.toArray();
+                for (const QJsonValue &entry : activeArray) {
+                    QString code;
+                    if (entry.isString()) {
+                        code = normalizeSliCode(entry.toString());
+                    } else if (entry.isDouble()) {
+                        code = normalizeSliCode(QString::number(entry.toInt()));
+                    }
+                    if (!code.isEmpty())
+                        activeCodes.insert(code);
+                }
+            }
+            activeCodes.insert(normalized);
+
+            QJsonArray nextActive;
+            for (const QString &code : std::as_const(activeCodes))
+                nextActive.append(code);
+
+            QJsonObject patch;
+            patch.insert(QStringLiteral("activeSliCodes"), nextActive);
+            const QString labelKey = QStringLiteral("inputLabel_%1").arg(normalized);
+            const QString existingLabel = m_meta.value(labelKey).toString().trimmed();
+            const QString defaultLabel = m_defaultInputLabelMap.value(normalized).trimmed();
+            const QString fallbackLabel = QStringLiteral("SLI %1").arg(normalized);
+            const auto isGenericSliLabel = [&normalized](const QString &label) {
+                QString compact = label.trimmed();
+                compact.remove(QLatin1Char(' '));
+                return compact.compare(QStringLiteral("SLI%1").arg(normalized), Qt::CaseInsensitive) == 0;
+            };
+            if (existingLabel.isEmpty()) {
+                patch.insert(labelKey, defaultLabel.isEmpty() ? fallbackLabel : defaultLabel);
+            } else if (!defaultLabel.isEmpty()
+                       && isGenericSliLabel(existingLabel)) {
+                // Repair old generic fallback labels once a known default exists.
+                patch.insert(labelKey, defaultLabel);
+            }
+
+            for (auto it = patch.begin(); it != patch.end(); ++it)
+                m_meta.insert(it.key(), it.value());
+            m_info.metaJson = toJson(m_meta);
+            applyConfig();
+
+            resp.formValuesJson = toJson(QJsonObject{
+                {QStringLiteral("activeSliCodes"), nextActive},
+                {QStringLiteral("currentInputCode"), normalized},
+            });
+            resp.fieldChoicesJson = toJson(QJsonObject{
+                {QStringLiteral("activeSliCodes"), optionsToChoiceJson(inputChoicesForChannel())},
+            });
+            resp.reloadLayout = true;
+
+            v1::Utf8String err;
+            if (!sendAdapterMetaUpdated(toJson(patch), &err))
+                std::cerr << "failed to send adapterMetaUpdated(probeCurrentInput): " << err << '\n';
+        }
         return resp;
     }
 
@@ -2109,6 +2141,7 @@ private:
     bool m_operationRunning = false;
     bool m_queuePumpScheduled = false;
     bool m_pollQueued = false;
+    bool m_pollRunning = false;
 
     std::unique_ptr<QTimer> m_pollTimer;
 };
