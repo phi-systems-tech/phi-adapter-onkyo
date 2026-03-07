@@ -9,7 +9,6 @@
 #include <memory>
 #include <optional>
 #include <string>
-#include <thread>
 #include <type_traits>
 #include <variant>
 #include <vector>
@@ -2090,8 +2089,6 @@ private:
             std::cerr << "failed to send device snapshot: " << err << '\n';
             return;
         }
-        if (!sendFullSyncCompleted(&err))
-            std::cerr << "failed to send fullSyncCompleted: " << err << '\n';
 
         m_synced = true;
     }
@@ -2476,14 +2473,22 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    while (g_running.load()) {
-        if (!host.pollOnce(std::chrono::milliseconds(250), &error)) {
-            std::cerr << "poll failed: " << error << '\n';
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    constexpr std::chrono::milliseconds kPollTimeout{16};
+
+    QTimer hostPollTimer;
+    QObject::connect(&hostPollTimer, &QTimer::timeout, [&]() {
+        if (!g_running.load(std::memory_order_relaxed)) {
+            app.quit();
+            return;
         }
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
-    }
+        if (!host.pollOnce(kPollTimeout, &error))
+            std::cerr << "poll failed: " << error << '\n';
+    });
+    hostPollTimer.start(16);
+
+    const int execResult = app.exec();
+    hostPollTimer.stop();
 
     host.stop();
-    return 0;
+    return execResult;
 }
