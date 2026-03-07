@@ -1,0 +1,5 @@
+phi-adapter-onkyo (0.0~git20260307-1) trixie; urgency=medium
+
+  * Initial Debian packaging for phi-adapter-onkyo.
+
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Sat, 07 Mar 2026 10:40:00 +0100

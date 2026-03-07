@@ -43,6 +43,14 @@ if(PHI_ADAPTER_ONKYO_BUILD_IPC)
         message(FATAL_ERROR "phi-adapter-sdk target phi::adapter-sdk not found")
     endif()
     if(NOT TARGET phi::adapter-sdk-qt)
+        if(PHI_ADAPTER_ONKYO_USE_LOCAL_ADAPTER_SDK AND EXISTS "${PHI_ADAPTER_SDK_SOURCE_DIR}/CMakeLists.txt")
+            message(FATAL_ERROR "phi::adapter-sdk was found locally but without Qt target; install phi-adapter-sdk-qt or enable Qt helpers in phi-adapter-sdk")
+        else()
+            message(STATUS "Using installed phi-adapter-sdk-qt via find_package")
+            find_package(phi-adapter-sdk-qt CONFIG REQUIRED)
+        endif()
+    endif()
+    if(NOT TARGET phi::adapter-sdk-qt)
         message(FATAL_ERROR "phi-adapter-sdk target phi::adapter-sdk-qt not found")
     endif()
 
@@ -56,6 +64,7 @@ if(PHI_ADAPTER_ONKYO_BUILD_IPC)
         PRIVATE
             Qt6::Core
             Qt6::Network
+            phi::adapter-sdk
             phi::adapter-sdk-qt
     )
 

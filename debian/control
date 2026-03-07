@@ -1,0 +1,22 @@
+Source: phi-adapter-onkyo
+Section: libs
+Priority: optional
+Maintainer: Marius Schumacher <marius.schumacher@phisys.com>
+Build-Depends:
+ debhelper-compat (= 13),
+ cmake,
+ ninja-build,
+ qt6-base-dev,
+ phi-adapter-sdk-dev,
+ phi-adapter-sdk-qt-dev
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Homepage: https://github.com/phi-systems-tech/phi-adapter-onkyo
+
+Package: phi-adapter-onkyo
+Architecture: any
+Depends:
+ ${shlibs:Depends},
+ ${misc:Depends}
+Description: PHI Onkyo/Pioneer adapter IPC sidecar
+ IPC sidecar executable for PHI core to integrate Onkyo/Pioneer AVRs.
