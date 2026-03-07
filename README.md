@@ -112,13 +112,13 @@ The adapter runs as a single sidecar process with one worker thread per instance
 ### Build
 
 ```bash
-cmake -S . -B build
-cmake --build build --parallel
+cmake -S . -B ../build/phi-adapter-onkyo/release-ninja -G Ninja
+cmake --build ../build/phi-adapter-onkyo/release-ninja --parallel
 ```
 
 ### Installation
 
-- Build output: `build/plugins/adapters/phi_adapter_onkyo_ipc`
+- Build output: `../build/phi-adapter-onkyo/release-ninja/plugins/adapters/phi_adapter_onkyo_ipc`
 - Deploy to: `/opt/phi/plugins/adapters/`
 
 ### Troubleshooting
