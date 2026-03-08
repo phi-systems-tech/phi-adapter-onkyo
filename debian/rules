@@ -8,6 +8,5 @@ export DEB_BUILD_MAINT_OPTIONS = hardening=+all
 override_dh_auto_configure:
 	dh_auto_configure -- \
 		-DCMAKE_INSTALL_PREFIX=/usr \
-		-DCMAKE_INSTALL_LIBDIR=lib \
 		-DPHI_ADAPTER_ONKYO_BUILD_IPC=ON \
 		-DPHI_ADAPTER_ONKYO_USE_LOCAL_ADAPTER_SDK=OFF
