@@ -1,3 +1,9 @@
+phi-adapter-onkyo (0.0~git20260307-2) trixie; urgency=medium
+
+  * Add explicit runtime dependencies on phi-adapter-sdk and phi-adapter-sdk-qt.
+
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Sun, 15 Mar 2026 21:20:00 +0100
+
 phi-adapter-onkyo (0.0~git20260307-1) trixie; urgency=medium
 
   * Initial Debian packaging for phi-adapter-onkyo.

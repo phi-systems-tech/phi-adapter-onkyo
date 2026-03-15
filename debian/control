@@ -17,6 +17,8 @@ Package: phi-adapter-onkyo
 Architecture: any
 Depends:
  ${shlibs:Depends},
- ${misc:Depends}
+ ${misc:Depends},
+ phi-adapter-sdk,
+ phi-adapter-sdk-qt
 Description: PHI Onkyo/Pioneer adapter IPC sidecar
  IPC sidecar executable for PHI core to integrate Onkyo/Pioneer AVRs.
