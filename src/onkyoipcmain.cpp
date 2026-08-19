@@ -2287,6 +2287,10 @@ class OnkyoIpcFactory final : public sdk::AdapterFactory
 protected:
     void onBootstrap(const sdk::BootstrapRequest &request) override
     {
+        // Runs on the factory backend thread; the SDK sends the bootstrap
+        // descriptor from the same task, so configSchemaJson() and
+        // createInstance() (host thread, both reachable only after that reply)
+        // see the labels written here.
         m_schemaInputLabels = loadConfiguredSliLabels(parseJsonObject(request.staticConfigJson));
     }
 
@@ -2367,6 +2371,14 @@ protected:
     v1::JsonText configSchemaJson() const override
     {
         return toJson(buildConfigSchemaObject(m_schemaInputLabels));
+    }
+
+    // handleFactoryActionInvoke() probes every candidate host with a blocking
+    // QTcpSocket::waitForConnected(900); on the host poll thread a multi-host
+    // probe stalled IPC for seconds.
+    std::unique_ptr<sdk::InstanceExecutionBackend> createFactoryExecutionBackend() override
+    {
+        return sdk::qt::createFactoryExecutionBackend();
     }
 
     std::unique_ptr<sdk::InstanceExecutionBackend> createInstanceExecutionBackend(
