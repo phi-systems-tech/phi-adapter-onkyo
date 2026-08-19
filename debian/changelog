@@ -1,4 +1,4 @@
-phi-adapter-onkyo (0.0~git20260819.4d24591-1) trixie; urgency=medium
+phi-adapter-onkyo (0.0~git202608191934.4d24591-1) trixie; urgency=medium
 
   * Honour the host's stop request in the blocking ISCP connect/read loops, the
     poll batch and the factory probe, instead of waiting out the connect and
