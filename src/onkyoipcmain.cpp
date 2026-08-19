@@ -1524,6 +1524,14 @@ private:
 
                 int waitedMs = 0;
                 while (!socket.waitForConnected(100)) {
+                    // Cooperative abort: stop() must not have to wait out the
+                    // full connect budget (F-33). stopRequested() is the host's
+                    // flag - m_stopping alone would never be seen here, because
+                    // stop() cannot run while this thread sits in a socket wait.
+                    if (m_stopping || stopRequested()) {
+                        socket.abort();
+                        return false;
+                    }
                     waitedMs += 100;
                     if (waitedMs >= connectTimeoutMs) {
                         timingLog(QStringLiteral("iscp.connect.timeout cmd=%1 host=%2 waitedMs=%3 err=%4")
@@ -1570,7 +1578,19 @@ private:
                           .arg(totalTimer.elapsed()));
 
                 if (parseResponse && responseTimeoutMs > 0) {
-                if (!socket.waitForReadyRead(responseTimeoutMs))
+                // Chunked so a stop request does not have to wait out the whole
+                // response timeout (F-33).
+                int plainWaitedMs = 0;
+                bool plainReady = false;
+                while (plainWaitedMs < responseTimeoutMs && !m_stopping && !stopRequested()) {
+                    const int slice = std::min(100, responseTimeoutMs - plainWaitedMs);
+                    if (socket.waitForReadyRead(slice)) {
+                        plainReady = true;
+                        break;
+                    }
+                    plainWaitedMs += slice;
+                }
+                if (!plainReady)
                     return false;
                 const QByteArray data = socket.readAll();
                 timingLog(QStringLiteral("iscp.read cmd=%1 bytes=%2 elapsedMs=%3")
@@ -1609,6 +1629,8 @@ private:
                       .arg(totalTimer.elapsed())
                       .arg(responseTimeoutMs));
             while (readWaitedMs < responseTimeoutMs) {
+                if (m_stopping || stopRequested())
+                    return false;
                 const bool ready = socket.waitForReadyRead(100);
                 if (!firstWaitLogged) {
                     trace(QStringLiteral("iscp phase cmd=%1 phase=first-readyread ready=%2 elapsedMs=%3")
@@ -1654,6 +1676,8 @@ private:
             maxAttempts = 1;
         bool hadConnectedSession = false;
         for (int attempt = 0; attempt < maxAttempts; ++attempt) {
+            if (m_stopping || stopRequested())
+                break;
             QTcpSocket socket;
             socket.setSocketOption(QAbstractSocket::KeepAliveOption, 1);
             QString connectedHost;
@@ -1718,7 +1742,9 @@ private:
                       .arg(static_cast<int>(m_operationQueue.size())));
         bool interrupted = false;
         auto shouldInterrupt = [&]() -> bool {
-            if (hasQueuedPriorityWork()) {
+            // A stop request interrupts the batch like priority work does, so
+            // teardown never waits out the poll (F-33).
+            if (m_stopping || stopRequested() || hasQueuedPriorityWork()) {
                 interrupted = true;
                 return true;
             }
@@ -2427,6 +2453,14 @@ private:
         QString errorMessage;
         QString successfulHost;
         for (const QString &host : hosts) {
+            // Each candidate costs a blocking connect; stop early instead of
+            // walking the whole list during shutdown (F-33).
+            if (stopRequested()) {
+                resp.status = v1::CmdStatus::Failure;
+                resp.error = "Probe cancelled: adapter is stopping";
+                resp.errorContext = "factory.action";
+                return resp;
+            }
             QString hostError;
             if (probeEndpoint(host, port, &hostError)) {
                 successfulHost = host;
