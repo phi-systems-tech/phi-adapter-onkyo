@@ -1,3 +1,11 @@
+phi-adapter-onkyo (0.0~git20260819.6a22dc7-1) trixie; urgency=medium
+
+  * Run the receiver probe on a factory execution backend instead of the host poll
+    thread, so a multi-host probe no longer stalls IPC for seconds (F-31).
+  * Rebuild against phi-adapter-sdk 0.4.0 (AdapterFactory vtable change).
+
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Wed, 19 Aug 2026 16:49:03 +0200
+
 phi-adapter-onkyo (0.0~git20260819.61d801c-1) trixie; urgency=medium
 
   * Drive the sidecar from the SDK main loop (no poll interval, no idle wakeups).
