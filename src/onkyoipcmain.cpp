@@ -28,6 +28,7 @@
 #include <QTimer>
 #include <QtGlobal>
 
+#include "phi/adapter/sdk/qt/sidecar_driver_qt.h"
 #include "phi/adapter/sdk/sidecar.h"
 #include "phi/adapter/sdk/qt/instance_execution_backend_qt.h"
 
@@ -2467,28 +2468,28 @@ int main(int argc, char **argv)
     OnkyoIpcFactory factory;
     sdk::SidecarHost host(socketPath, factory);
 
+    // The driver watches the host's poll descriptor from the Qt event loop:
+    // no polling interval, no idle wakeups, and the Qt event loop is no longer
+    // starved by a blocking poll (adapter timers now run on time).
+    phicore::adapter::sdk::qt::SidecarDriver driver(host);
+
     v1::Utf8String error;
-    if (!host.start(&error)) {
+    if (!driver.start(&error)) {
         std::cerr << "failed to start sidecar host: " << error << '\n';
         return 1;
     }
 
-    constexpr std::chrono::milliseconds kPollTimeout{16};
-
-    QTimer hostPollTimer;
-    QObject::connect(&hostPollTimer, &QTimer::timeout, [&]() {
-        if (!g_running.load(std::memory_order_relaxed)) {
+    // Signal handlers only flip a flag; a slow timer turns it into a clean
+    // Qt shutdown.
+    QTimer shutdownTimer;
+    QObject::connect(&shutdownTimer, &QTimer::timeout, [&]() {
+        if (!g_running.load(std::memory_order_relaxed))
             app.quit();
-            return;
-        }
-        if (!host.pollOnce(kPollTimeout, &error))
-            std::cerr << "poll failed: " << error << '\n';
     });
-    hostPollTimer.start(16);
+    shutdownTimer.start(250);
 
     const int execResult = app.exec();
-    hostPollTimer.stop();
+    driver.stop();
 
-    host.stop();
     return execResult;
 }
