@@ -61,7 +61,13 @@ if(PHI_ADAPTER_ONKYO_BUILD_IPC)
     endif()
 
     add_executable(phi_adapter_onkyo_ipc
-        src/onkyoipcmain.cpp
+        src/main.cpp
+        src/onkyo_probe.cpp
+        src/onkyo_protocol.cpp
+        src/onkyo_runtime_convert.cpp
+        src/onkyo_schema.cpp
+        src/onkyo_sidecar.cpp
+        src/onkyo_trace.cpp
     )
 
     target_compile_features(phi_adapter_onkyo_ipc PRIVATE cxx_std_20)
