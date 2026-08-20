@@ -1,3 +1,14 @@
+phi-adapter-onkyo (0.0~git202608201112.3c817e8-1) trixie; urgency=medium
+
+  * Split the single-translation-unit sidecar into onkyo_protocol, onkyo_schema,
+    onkyo_probe, onkyo_runtime_convert, onkyo_trace, onkyo_sidecar and main (F-34).
+    The instance class is private to its .cpp behind makeInstance().
+  * Fold the three copies of the plain-frame command sequence into buildPlainFrame().
+  * No behaviour change: the factory descriptor and the config.changed frames are
+    byte-identical to the pre-split binary.
+
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Thu, 20 Aug 2026 11:12:25 +0200
+
 phi-adapter-onkyo (0.0~git202608192326.e83a1cb-1) trixie; urgency=medium
 
   * Rebuild against phi-adapter-sdk 0.6.0: the log vocabulary was renumbered and
