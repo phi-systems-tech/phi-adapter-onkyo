@@ -1,3 +1,9 @@
+phi-adapter-onkyo (0.0~git202608211608.fb49307-1) trixie; urgency=medium
+
+  * Rebuild against phi-adapter-sdk-qt 0.6.1: Adapter::port is initialised, so an
+    adapter built field by field no longer carries a stray port.
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Fri, 21 Aug 2026 16:08:03 +0200
+
 phi-adapter-onkyo (0.0~git202608201112.3c817e8-1) trixie; urgency=medium
 
   * Split the single-translation-unit sidecar into onkyo_protocol, onkyo_schema,
