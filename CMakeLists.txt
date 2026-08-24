@@ -80,6 +80,25 @@ if(PHI_ADAPTER_ONKYO_BUILD_IPC)
             phi::adapter-sdk-qt
     )
 
+    # The eISCP wire and the selector vocabulary, tested without a receiver.
+    enable_testing()
+    add_executable(onkyo_protocol_tests
+        tests/onkyo_protocol_tests.cpp
+        src/onkyo_probe.cpp
+        src/onkyo_protocol.cpp
+        src/onkyo_trace.cpp
+    )
+    target_compile_features(onkyo_protocol_tests PRIVATE cxx_std_20)
+    target_include_directories(onkyo_protocol_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(onkyo_protocol_tests
+        PRIVATE
+            Qt6::Core
+            Qt6::Network
+            phi::adapter-sdk
+            phi::adapter-sdk-qt
+    )
+    add_test(NAME onkyo_protocol_tests COMMAND onkyo_protocol_tests)
+
     set_target_properties(phi_adapter_onkyo_ipc PROPERTIES
         OUTPUT_NAME "phi_adapter_onkyo_ipc"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins/adapters"
