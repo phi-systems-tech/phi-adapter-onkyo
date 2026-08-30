@@ -1,3 +1,9 @@
+phi-adapter-onkyo (0.0~git202608301437.0786fd8-1) trixie; urgency=medium
+
+  * Carries the eISCP wire and selector test suite added on 24 August.
+
+ -- Marius Schumacher <google@phisys.com>  Sun, 30 Aug 2026 14:37:12 +0200
+
 phi-adapter-onkyo (0.0~git202608211608.fb49307-1) trixie; urgency=medium
 
   * Rebuild against phi-adapter-sdk-qt 0.6.1: Adapter::port is initialised, so an
