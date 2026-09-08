@@ -104,6 +104,13 @@ one at a time.
   - Three consecutive polls that could not open a connection are what turns
     connectivity off; one missed answer is not a receiver that has gone away.
 
+**What connectivity means here:** the TCP connection, and only that. A receiver
+in standby accepts the socket and hangs up without answering a query - it is
+reported as connected, because a receiver you can reach is a receiver you can
+switch on, and the UI has to offer that. Power stays `Unknown` until the
+receiver says otherwise. Only a connection that cannot be made at all is
+reported as disconnected.
+
 - `Running + Connected`
   - `connected=true`
   - Poll timer uses `pollIntervalMs`.

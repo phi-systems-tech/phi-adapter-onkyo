@@ -139,6 +139,32 @@ void IscpClient::closeSocket()
     m_deadline.reset();
     m_coalesce.reset();
     if (m_fd >= 0) {
+        // Half-close first, and empty what is waiting before letting go.
+        //
+        // close() on a socket that still has unread data makes the kernel send
+        // a reset instead of a finish, and a reset discards whatever of ours
+        // has been written but not yet acknowledged. phi-core paid for that
+        // once already - a retained sweep reported three topics cleared and
+        // left the third one standing - and the command it would cost here is
+        // the power write: it is sent with nothing behind it to await, so
+        // nothing would notice that it never arrived. A receiver that
+        // volunteers status, which they do, is all it takes to fill the
+        // receive queue in the meantime.
+        //
+        // shutdown(SHUT_WR) puts our bytes on the wire with the FIN, so they
+        // are gone before any reset can matter. The drain is bounded and
+        // non-blocking: it removes the reason for a reset without waiting for
+        // a receiver that has decided to keep talking.
+        ::shutdown(m_fd, SHUT_WR);
+        char discard[2048];
+        for (int round = 0; round < 32; ++round) {
+            const ssize_t got = ::recv(m_fd, discard, sizeof(discard), MSG_DONTWAIT);
+            if (got > 0)
+                continue;
+            if (got < 0 && errno == EINTR)
+                continue;
+            break;
+        }
         ::close(m_fd);
         m_fd = -1;
     }

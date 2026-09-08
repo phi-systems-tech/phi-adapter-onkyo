@@ -35,9 +35,10 @@ class StubReceiver
 {
 public:
     enum class Manner {
-        Answer,      ///< a proper reply per query
-        StaySilent,  ///< accepts the connection and says nothing
-        TalkNonsense ///< a frame whose declared length cannot be believed
+        Answer,       ///< a proper reply per query
+        StaySilent,   ///< accepts the connection and says nothing
+        TalkNonsense, ///< a frame whose declared length cannot be believed
+        NeverStops    ///< answers, then keeps volunteering status without pause
     };
 
     explicit StubReceiver(Manner manner) : m_manner(manner)
@@ -69,6 +70,9 @@ public:
     bool ok() const { return m_ok; }
     std::uint16_t port() const { return m_port; }
     int queriesSeen() const { return m_queries.load(); }
+    /// How the connection ended from this side: EOF is orderly, ECONNRESET is not.
+    bool sawOrderlyEnd() const { return m_orderlyEnd.load(); }
+    int endErrno() const { return m_endErrno.load(); }
 
 private:
     /// The answer a receiver gives to each of the four queries the poll sends.
@@ -85,6 +89,21 @@ private:
         return {};
     }
 
+    /// Keeps the client's receive queue occupied for as long as it will take
+    /// anything, so there is certainly unread data when it closes.
+    void flood(int client)
+    {
+        std::string burst;
+        for (int i = 0; i < 2000; ++i)
+            burst += encodeEiscpFrame("PWR01");
+        for (int round = 0; round < 200 && !m_done.load(); ++round) {
+            const ssize_t sent =
+                ::send(client, burst.data(), burst.size(), MSG_NOSIGNAL | MSG_DONTWAIT);
+            if (sent <= 0)
+                break;
+        }
+    }
+
     void serve()
     {
         while (!m_done.load()) {
@@ -92,11 +111,14 @@ private:
             if (client < 0)
                 return;
             std::string buffer;
+            ssize_t last = 0;
             for (;;) {
                 char chunk[512];
                 const ssize_t got = ::recv(client, chunk, sizeof(chunk), 0);
-                if (got <= 0)
+                if (got <= 0) {
+                    last = got;
                     break;
+                }
                 buffer.append(chunk, static_cast<std::size_t>(got));
 
                 const FrameScan scan = decodeEiscpFrames(buffer);
@@ -122,13 +144,21 @@ private:
                         continue;
                     const std::string frame = encodeEiscpFrame(answer);
                     ::send(client, frame.data(), frame.size(), MSG_NOSIGNAL);
+                    if (m_manner == Manner::NeverStops)
+                        flood(client);
                 }
             }
+            if (last == 0)
+                m_orderlyEnd.store(true);
+            else
+                m_endErrno.store(errno);
             ::close(client);
         }
     }
 
     Manner m_manner;
+    std::atomic_bool m_orderlyEnd{false};
+    std::atomic_int m_endErrno{0};
     int m_listen = -1;
     bool m_ok = false;
     std::uint16_t m_port = 0;
@@ -194,9 +224,14 @@ void testAPollBatchComesBackWhole()
 
 void testReachableAndAnsweringAreDifferentAnswers()
 {
-    // The receiver takes the connection and says nothing. Connectivity is a
-    // fact about the network; whether the exchange worked is a different one,
-    // and the instance reports them on different channels.
+    // The receiver takes the connection and says nothing - a Pioneer in standby
+    // does exactly this, accepting the socket and hanging up without answering.
+    //
+    // It still counts as connected, and that is the decision rather than an
+    // accident: a receiver you can reach is a receiver you can switch on, so
+    // the UI must offer it. Only a connection that cannot be made is
+    // disconnected. Whether the exchange then worked is a separate fact, and
+    // the instance reports it on separate channels - power stays Unknown.
     StubReceiver receiver(StubReceiver::Manner::StaySilent);
     PHI_CHECK(receiver.ok());
 
@@ -222,6 +257,9 @@ void testReachableAndAnsweringAreDifferentAnswers()
 
 void testNothingListeningIsNotReachable()
 {
+    // The other half of the rule: no connection, no connectivity. There is
+    // nothing to switch on at a port nothing is listening to.
+    //
     // Bind and close, so the port is one nothing answers on.
     std::uint16_t deadPort = 0;
     {
@@ -289,6 +327,40 @@ void testAStreamWeHaveLostOurPlaceInEndsRatherThanHangs()
                   static_cast<long long>(elapsed.count()));
 }
 
+void testTheConnectionIsLetGoOfRatherThanTornDown()
+{
+    // Closing a socket that still has unread data on it makes the kernel send a
+    // reset instead of a finish, and a reset discards whatever of ours has not
+    // been acknowledged yet. phi-core paid for this once already: a retained
+    // sweep reported three topics cleared and left the third one standing.
+    //
+    // Here it would be the power command. A receiver that volunteers status -
+    // which they do - can have filled our receive queue by the time the write
+    // is done, and "switch the receiver on" is the one command with nothing
+    // behind it to notice that it never arrived.
+    StubReceiver receiver(StubReceiver::Manner::NeverStops);
+    PHI_CHECK(receiver.ok());
+
+    IscpRequest request = pollRequest(receiver.port());
+    request.commands = {"PWRQSTN"};
+
+    const auto result = run(request);
+    PHI_CHECK(result.has_value());
+    if (!result)
+        return;
+    PHI_CHECK(result->connected);
+
+    // This passes with a bare close() as well: on loopback the client drains
+    // whatever it reads, so the two conditions a reset needs - our bytes not
+    // yet delivered, and their bytes not yet read - do not coincide here. What
+    // it pins is the invariant, so a later change that stops draining, or that
+    // closes without the half-close, is caught. The evidence that the kernel
+    // does send a reset in that situation is a four-line C program, not this.
+    std::this_thread::sleep_for(200ms);
+    PHI_CHECK_MSG(receiver.sawOrderlyEnd(),
+                  "the receiver saw errno %d instead of an orderly end", receiver.endErrno());
+}
+
 } // namespace
 
 int main()
@@ -298,5 +370,6 @@ int main()
     testNothingListeningIsNotReachable();
     testTheFirstCandidateThatAnswersIsUsed();
     testAStreamWeHaveLostOurPlaceInEndsRatherThanHangs();
+    testTheConnectionIsLetGoOfRatherThanTornDown();
     return phi::testing::report("onkyo_iscp_client_tests");
 }
