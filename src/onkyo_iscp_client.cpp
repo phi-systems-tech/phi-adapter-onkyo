@@ -1,6 +1,7 @@
 #include "onkyo_iscp_client.h"
 
 #include <cerrno>
+#include <optional>
 #include <cstring>
 #include <utility>
 
@@ -20,9 +21,29 @@ namespace str = phi::str;
 
 namespace {
 
-/// How long to keep reading after the first frame of an answer. A receiver
-/// splits one answer across frames, and the old code allowed the same window.
+/// The wait after the first whole frame, kept only for a command whose answer
+/// this adapter cannot recognise. Every command it actually sends is in the
+/// table below, so this is the fallback and not the normal path.
 constexpr auto kCoalesceWindow = std::chrono::milliseconds(120);
+
+/**
+ * @brief What a query asks for, or nothing when it is not a query.
+ *
+ * A receiver volunteers status nobody asked for, so "a frame arrived" is not
+ * "the question was answered". This is how the two are told apart.
+ */
+std::optional<StatusKind> expectedAnswer(std::string_view command)
+{
+    if (command == "PWRQSTN")
+        return StatusKind::Power;
+    if (command == "MVLQSTN")
+        return StatusKind::Volume;
+    if (command == "AMTQSTN")
+        return StatusKind::Mute;
+    if (command == "SLIQSTN")
+        return StatusKind::Input;
+    return std::nullopt;
+}
 
 constexpr std::size_t kReadChunk = 4096;
 
@@ -171,6 +192,7 @@ void IscpClient::closeSocket()
     m_inbound.clear();
     m_outbound.clear();
     m_written = 0;
+    m_expected.reset();
     m_sawReply = false;
 }
 
@@ -251,7 +273,10 @@ void IscpClient::onConnectable()
 void IscpClient::sendCurrentCommand()
 {
     if (m_commandIndex >= m_request.commands.size()) {
-        m_result.complete = true;
+        // Complete means every question got its answer. A poll that lost one
+        // still carries the other three, and the caller decides what that is
+        // worth - `answered` and `unanswered` are there for exactly that.
+        m_result.complete = m_result.unanswered == 0;
         finish();
         return;
     }
@@ -260,7 +285,10 @@ void IscpClient::sendCurrentCommand()
     m_outbound = kUseEiscp ? encodeEiscpFrame(command) : encodePlainFrame(command);
     m_written = 0;
     m_sawReply = false;
-    m_inbound.clear();
+    m_expected = expectedAnswer(command);
+    // The buffer is not cleared between commands. Advancing the moment an
+    // answer arrives can leave the beginning of the next frame behind, and
+    // throwing that away would lose the answer it belongs to.
 
     while (m_written < m_outbound.size()) {
         const ssize_t sent = ::send(m_fd, m_outbound.data() + m_written,
@@ -291,9 +319,31 @@ void IscpClient::sendCurrentCommand()
         return;
     }
 
+    awaitAnswer();
+}
+
+void IscpClient::awaitAnswer()
+{
     m_deadline = m_loop.timerAfter(m_request.replyTimeout, [this]() {
-        failAttempt(str::arg("No answer to %1", m_request.commands[m_commandIndex]));
+        if (m_result.answered == 0) {
+            // Nothing has answered anything yet. That is a receiver which is
+            // not talking - a Pioneer in standby takes the connection and says
+            // nothing - not a query it happens not to know, so there is no
+            // point spending a timeout on each of the remaining ones.
+            failAttempt(str::arg("No answer to %1", m_request.commands[m_commandIndex]));
+            return;
+        }
+        // It has answered other things, so this is a query this model does not
+        // know. The three answers already in hand are worth more than treating
+        // the whole poll as failed, which is what a receiver that skips one
+        // query used to get.
+        ++m_result.unanswered;
+        advanceCommand();
     });
+
+    // An answer may already be sitting in the buffer, carried over from the
+    // command before.
+    consumeInbound();
 }
 
 void IscpClient::onReadable()
@@ -317,10 +367,19 @@ void IscpClient::onReadable()
         return;
     }
 
+    consumeInbound();
+}
+
+void IscpClient::consumeInbound()
+{
     const FrameScan scan = decodeEiscpFrames(m_inbound);
+    bool answered = false;
     for (const std::string &payload : scan.payloads) {
-        for (Status &status : parseStatuses(payload))
+        for (Status &status : parseStatuses(payload)) {
+            if (m_expected.has_value() && status.kind == *m_expected)
+                answered = true;
             m_result.statuses.push_back(std::move(status));
+        }
     }
     m_inbound.erase(0, scan.consumed);
 
@@ -330,11 +389,24 @@ void IscpClient::onReadable()
         failAttempt("Malformed frame from the receiver");
         return;
     }
-    if (scan.payloads.empty() || m_sawReply)
+    if (!m_request.awaitReplies)
         return;
 
-    // Answered. Keep reading briefly: a receiver splits one answer over several
-    // frames, and this is the window the blocking version allowed for it.
+    if (m_expected.has_value()) {
+        // The question is answered when its own answer arrives, and not before:
+        // a volunteered status is not a reply to what was asked.
+        if (!answered)
+            return;
+        ++m_result.answered;
+        advanceCommand();
+        return;
+    }
+
+    // A command whose answer is not in the table. Fall back to what the
+    // blocking version did: the first whole frame, then a short wait for the
+    // rest of an answer that might have been split.
+    if (scan.payloads.empty() || m_sawReply)
+        return;
     m_sawReply = true;
     m_deadline.reset();
     m_coalesce = m_loop.timerAfter(kCoalesceWindow, [this]() { advanceCommand(); });

@@ -116,6 +116,14 @@ reported as disconnected.
   - Poll timer uses `pollIntervalMs`.
   - One poll opens a connection and asks `PWRQSTN`, `MVLQSTN`, `AMTQSTN`,
     `SLIQSTN`, each awaited before the next goes out.
+  - A query is answered when *its own* answer arrives, not when any frame does:
+    a receiver volunteers status nobody asked for. The next query goes out at
+    that moment rather than after a fixed wait for a continuation that a
+    measured Pioneer never sends - which took a poll from 1048 ms to about 470.
+  - A query this model does not know costs its reply timeout and is then
+    skipped; the other three answers still arrive and are still reported. Only
+    when *nothing* has answered is the exchange abandoned, because that is a
+    receiver in standby rather than a query it does not recognise.
   - Channel updates are emitted only on value changes.
 
 - `Paused`

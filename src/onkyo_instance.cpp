@@ -381,8 +381,14 @@ private:
         m_client->start(requestFor(pollCommands(), true), [this](IscpResult result) {
             applyResult(result);
             armPollTimer();
-            timingLog(str::arg("poll.end status=%1 host=%2",
-                               result.complete ? "success" : "failure", result.host));
+            // A poll that lost one query still brought back the others, and
+            // saying "failure" about it would hide three good answers. What is
+            // worth knowing is how many of the four came back.
+            timingLog(str::arg("poll.end status=%1 answered=%2 of %3 host=%4",
+                               result.answered > 0 ? "success" : "failure",
+                               result.answered,
+                               static_cast<int>(pollCommands().size()),
+                               result.host));
             finishOperation();
         });
     }
@@ -612,7 +618,7 @@ private:
         m_client->start(std::move(request), [this](IscpResult result) {
             applyResult(result);
             const std::string code = m_state.lastInputCode();
-            if (!result.complete && code.empty()) {
+            if (result.answered == 0 && code.empty()) {
                 completeAction(v1::CmdStatus::TemporarilyOffline, "Receiver unavailable");
                 return;
             }

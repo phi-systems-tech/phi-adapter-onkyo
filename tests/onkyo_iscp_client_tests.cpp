@@ -38,7 +38,8 @@ public:
         Answer,       ///< a proper reply per query
         StaySilent,   ///< accepts the connection and says nothing
         TalkNonsense, ///< a frame whose declared length cannot be believed
-        NeverStops    ///< answers, then keeps volunteering status without pause
+        NeverStops,   ///< answers, then keeps volunteering status without pause
+        SkipsOneQuery ///< answers everything except AMTQSTN, as model lines do
     };
 
     explicit StubReceiver(Manner manner) : m_manner(manner)
@@ -76,7 +77,14 @@ public:
 
 private:
     /// The answer a receiver gives to each of the four queries the poll sends.
-    static std::string answerFor(const std::string &command)
+    std::string answerFor(const std::string &command) const
+    {
+        if (m_manner == Manner::SkipsOneQuery && command.rfind("AMTQSTN", 0) == 0)
+            return {};
+        return knownAnswerFor(command);
+    }
+
+    static std::string knownAnswerFor(const std::string &command)
     {
         if (command.rfind("PWRQSTN", 0) == 0)
             return "PWR01";
@@ -197,6 +205,67 @@ IscpRequest pollRequest(std::uint16_t port)
     return request;
 }
 
+void testAnAnswerIsTheAnswerToWhatWasAsked()
+{
+    // The question this replaces: "did a frame arrive?" - which a receiver
+    // volunteering status could satisfy without answering anything. Now each
+    // query waits for its own kind of answer and moves on the moment it has it,
+    // instead of waiting a fixed window in case more was coming. On the
+    // measured Pioneer that window was 480 of a 1048 ms poll, and it bought
+    // nothing: it answers each query with one frame and volunteers nothing.
+    StubReceiver receiver(StubReceiver::Manner::Answer);
+    PHI_CHECK(receiver.ok());
+
+    const auto before = std::chrono::steady_clock::now();
+    const auto result = run(pollRequest(receiver.port()));
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - before);
+
+    PHI_CHECK(result.has_value());
+    if (!result)
+        return;
+    PHI_CHECK(result->complete);
+    PHI_CHECK_MSG(result->answered == 4, "answered %d of 4", result->answered);
+    PHI_CHECK(result->unanswered == 0);
+    // Four answers on loopback take no time at all. The old fixed wait would
+    // have put 480 ms on top of them, so this is what pins that it is gone.
+    PHI_CHECK_MSG(elapsed < 300ms, "four instant answers took %lldms",
+                  static_cast<long long>(elapsed.count()));
+}
+
+void testOneQueryAModelDoesNotKnowDoesNotLoseTheOthers()
+{
+    // Model lines and firmware differ in which queries they answer - the
+    // README has said so from the beginning. A poll that waits for an answer
+    // that is never coming used to abandon the whole exchange, which would
+    // have thrown away three good answers to protect one missing one.
+    StubReceiver receiver(StubReceiver::Manner::SkipsOneQuery);
+    PHI_CHECK(receiver.ok());
+
+    IscpRequest request = pollRequest(receiver.port());
+    request.replyTimeout = 200ms;
+
+    const auto result = run(request);
+    PHI_CHECK(result.has_value());
+    if (!result)
+        return;
+    PHI_CHECK(result->connected);
+    PHI_CHECK_MSG(!result->complete, "a poll with a gap in it claimed to be complete");
+    PHI_CHECK_MSG(result->answered == 3, "answered %d, expected 3", result->answered);
+    PHI_CHECK_MSG(result->unanswered == 1, "unanswered %d, expected 1", result->unanswered);
+
+    // And the three answers are actually there to be used.
+    bool sawPower = false, sawVolume = false, sawInput = false, sawMute = false;
+    for (const Status &status : result->statuses) {
+        sawPower |= status.kind == StatusKind::Power;
+        sawVolume |= status.kind == StatusKind::Volume;
+        sawInput |= status.kind == StatusKind::Input;
+        sawMute |= status.kind == StatusKind::Mute;
+    }
+    PHI_CHECK(sawPower && sawVolume && sawInput);
+    PHI_CHECK_MSG(!sawMute, "the query the receiver skipped produced a status anyway");
+}
+
 void testAPollBatchComesBackWhole()
 {
     StubReceiver receiver(StubReceiver::Manner::Answer);
@@ -250,8 +319,12 @@ void testReachableAndAnsweringAreDifferentAnswers()
     PHI_CHECK_MSG(result->connected, "a completed TCP connect was not reported");
     PHI_CHECK(!result->complete);
     PHI_CHECK(!result->error.empty());
-    // The silence costs one reply timeout, not the connect budget.
-    PHI_CHECK_MSG(elapsed < 1500ms, "a silent receiver cost %lldms",
+    // The silence costs one reply timeout - not the connect budget, and not
+    // one timeout per query either. Nothing having answered anything is a
+    // receiver that is not talking, so there is no reason to ask the other
+    // three and wait out each of them.
+    PHI_CHECK(result->answered == 0);
+    PHI_CHECK_MSG(elapsed < 700ms, "a silent receiver cost %lldms",
                   static_cast<long long>(elapsed.count()));
 }
 
@@ -366,6 +439,8 @@ void testTheConnectionIsLetGoOfRatherThanTornDown()
 int main()
 {
     testAPollBatchComesBackWhole();
+    testAnAnswerIsTheAnswerToWhatWasAsked();
+    testOneQueryAModelDoesNotKnowDoesNotLoseTheOthers();
     testReachableAndAnsweringAreDifferentAnswers();
     testNothingListeningIsNotReachable();
     testTheFirstCandidateThatAnswersIsUsed();
