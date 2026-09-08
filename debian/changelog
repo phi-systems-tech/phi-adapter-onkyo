@@ -1,13 +1,13 @@
-phi-adapter-onkyo (0.0~git202609081014.9d0be55-1) trixie; urgency=medium
+phi-adapter-onkyo (0.0~git202609081042.8cb7ec9-1) trixie; urgency=medium
 
-  * Connectivity is the TCP connection and nothing more: a receiver in standby
-    accepts the socket and hangs up without answering, and stays connected,
-    because a receiver you can reach is one you can switch on. Only a
-    connection that cannot be made reads as disconnected.
-  * The socket is half-closed and drained before it is let go. close() with
-    unread data pending makes the kernel send a reset, which discards whatever
-    of ours is not yet acknowledged - and the power write is the one command
-    with nothing behind it to notice.
+  * A query is answered when its own answer arrives, not when any frame does,
+    and the next one goes out at that moment. The fixed 120 ms wait after each
+    answer is gone: four instant answers took 482 ms and now take none, and on
+    a measured Pioneer - which answers each query with one frame and volunteers
+    nothing - it was 480 ms of a 1048 ms poll.
+  * A query a model does not know is counted and skipped instead of failing the
+    exchange, so the other three answers still arrive. Only a receiver that has
+    answered nothing at all is given up on, after one timeout rather than four.
 
- -- Marius Schumacher <marius.schumacher@phisys.com>  Tue, 08 Sep 2026 10:14:29 +0200
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Tue, 08 Sep 2026 10:42:55 +0200
 
