@@ -1,99 +1,114 @@
 #include "onkyo_probe.h"
 
-#include <utility>
+#include <cerrno>
+#include <cstring>
 
-#include <QElapsedTimer>
-#include <QHostAddress>
-#include <QJsonValue>
-#include <QTcpSocket>
+#include <netdb.h>
+#include <poll.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
-#include "onkyo_protocol.h"
+#include "phi/runtime/str.h"
+
 #include "onkyo_trace.h"
 
 namespace phicore::onkyo::ipc {
 
-QStringList resolveProbeHosts(const QJsonObject &params)
-{
-    QStringList ips;
-    QStringList hosts;
-    auto appendIfMissing = [&ips, &hosts](const QString &value) {
-        const QString normalized = value.trimmed();
-        if (normalized.isEmpty())
-            return;
-        QHostAddress addr;
-        if (addr.setAddress(normalized)) {
-            if (!ips.contains(normalized))
-                ips.push_back(normalized);
-            return;
-        }
-        if (!hosts.contains(normalized))
-            hosts.push_back(normalized);
-    };
+namespace str = phi::str;
 
-    appendIfMissing(params.value(QStringLiteral("ip")).toString());
-    const QJsonObject adapterObj = params.value(QStringLiteral("adapter")).toObject();
-    if (!adapterObj.isEmpty())
-        appendIfMissing(adapterObj.value(QStringLiteral("ip")).toString());
-    appendIfMissing(params.value(QStringLiteral("host")).toString());
-    if (!adapterObj.isEmpty())
-        appendIfMissing(adapterObj.value(QStringLiteral("host")).toString());
-    QStringList result = ips;
-    for (const QString &host : std::as_const(hosts)) {
-        if (!result.contains(host))
-            result.push_back(host);
+namespace {
+
+/// Short enough that a cancelled probe stops promptly, long enough that the
+/// wait is a wait and not a spin.
+constexpr int kPollSliceMs = 50;
+
+class Descriptor
+{
+public:
+    explicit Descriptor(int fd) : m_fd(fd) {}
+    ~Descriptor()
+    {
+        if (m_fd >= 0)
+            ::close(m_fd);
     }
-    return result;
-}
+    Descriptor(const Descriptor &) = delete;
+    Descriptor &operator=(const Descriptor &) = delete;
+    int get() const { return m_fd; }
 
-std::uint16_t resolveProbePort(const QJsonObject &params)
+private:
+    int m_fd;
+};
+
+} // namespace
+
+bool probeEndpoint(const std::string &host,
+                   std::uint16_t port,
+                   std::chrono::milliseconds timeout,
+                   const std::function<bool()> &cancelled,
+                   std::string *errorMessage)
 {
-    auto parsePort = [](const QJsonValue &value) -> std::uint16_t {
-        if (value.isDouble())
-            return normalizedPort(value.toInt());
-        if (value.isString()) {
-            bool ok = false;
-            const int parsed = value.toString().trimmed().toInt(&ok, 10);
-            if (ok)
-                return normalizedPort(parsed);
-        }
-        return 0;
-    };
-
-    return parsePort(params.value(QStringLiteral("iscpPort")));
-}
-
-bool probeEndpoint(const QString &host, std::uint16_t port, QString *errorMessage)
-{
-    QElapsedTimer timer;
-    timer.start();
-    timingLog(QStringLiteral("factory.probe.start host=%1 port=%2").arg(host).arg(port));
-    trace(QStringLiteral("factory probe start host=%1 port=%2").arg(host).arg(port));
-    QTcpSocket socket;
-    socket.connectToHost(host, port);
-    if (!socket.waitForConnected(900)) {
-        timingLog(QStringLiteral("factory.probe.end status=failure host=%1 port=%2 elapsedMs=%3 error=%4")
-                      .arg(host)
-                      .arg(port)
-                      .arg(timer.elapsed())
-                      .arg(socket.errorString()));
-        trace(QStringLiteral("factory probe failed host=%1 port=%2 elapsedMs=%3 error=%4")
-                  .arg(host)
-                  .arg(port)
-                  .arg(timer.elapsed())
-                  .arg(socket.errorString()));
+    const auto fail = [errorMessage](std::string message) {
         if (errorMessage)
-            *errorMessage = socket.errorString();
+            *errorMessage = std::move(message);
         return false;
+    };
+
+    timingLog(str::arg("factory.probe.start host=%1 port=%2", host, port));
+
+    ::addrinfo hints{};
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    ::addrinfo *resolved = nullptr;
+    const std::string service = str::number(static_cast<int>(port));
+    const int rc = ::getaddrinfo(host.c_str(), service.c_str(), &hints, &resolved);
+    if (rc != 0 || resolved == nullptr)
+        return fail(std::string("Cannot resolve host: ") + ::gai_strerror(rc));
+
+    Descriptor socket(::socket(resolved->ai_family, resolved->ai_socktype | SOCK_NONBLOCK,
+                               resolved->ai_protocol));
+    if (socket.get() < 0) {
+        const std::string error = std::strerror(errno);
+        ::freeaddrinfo(resolved);
+        return fail(error);
     }
-    timingLog(QStringLiteral("factory.probe.end status=success host=%1 port=%2 elapsedMs=%3")
-                  .arg(host)
-                  .arg(port)
-                  .arg(timer.elapsed()));
-    trace(QStringLiteral("factory probe ok host=%1 port=%2 elapsedMs=%3")
-              .arg(host)
-              .arg(port)
-              .arg(timer.elapsed()));
-    socket.disconnectFromHost();
+
+    const int connectResult = ::connect(socket.get(), resolved->ai_addr, resolved->ai_addrlen);
+    const int connectErrno = errno;
+    ::freeaddrinfo(resolved);
+
+    if (connectResult != 0 && connectErrno != EINPROGRESS)
+        return fail(std::strerror(connectErrno));
+
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (connectResult != 0) {
+        if (cancelled && cancelled())
+            return fail("Probe cancelled: adapter is stopping");
+        if (std::chrono::steady_clock::now() >= deadline)
+            return fail("Connection timed out");
+
+        ::pollfd waiting{};
+        waiting.fd = socket.get();
+        waiting.events = POLLOUT;
+        const int ready = ::poll(&waiting, 1, kPollSliceMs);
+        if (ready < 0) {
+            if (errno == EINTR)
+                continue;
+            return fail(std::strerror(errno));
+        }
+        if (ready == 0)
+            continue;
+
+        int soError = 0;
+        ::socklen_t length = sizeof(soError);
+        if (::getsockopt(socket.get(), SOL_SOCKET, SO_ERROR, &soError, &length) != 0)
+            return fail(std::strerror(errno));
+        if (soError != 0)
+            return fail(std::strerror(soError));
+        break;
+    }
+
+    timingLog(str::arg("factory.probe.end status=success host=%1 port=%2", host, port));
     return true;
 }
+
 } // namespace phicore::onkyo::ipc

@@ -8,14 +8,13 @@ project(phi-adapter-onkyo
 
 include(GNUInstallDirs)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-set(CMAKE_AUTOMOC ON)
-set(CMAKE_AUTORCC ON)
-
-find_package(Qt6 REQUIRED COMPONENTS Core Network)
+# No Qt. The event loop, the timers and the strings come from phi-runtime
+# (through the SDK), and JSON from nlohmann, which is what phi-core uses.
+find_package(nlohmann_json 3.11 REQUIRED)
 
 option(PHI_ADAPTER_ONKYO_BUILD_IPC
     "Build IPC sidecar executable for onkyo adapter"
@@ -24,9 +23,6 @@ option(PHI_ADAPTER_ONKYO_BUILD_IPC
 
 set(PHI_ADAPTER_SDK_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../phi-adapter-sdk" CACHE PATH
     "Path to local phi-adapter-sdk checkout. If not found, find_package(phi-adapter-sdk) is used."
-)
-set(PHI_ADAPTER_SDK_QT_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../phi-adapter-sdk-qt" CACHE PATH
-    "Path to local phi-adapter-sdk-qt checkout. If not found, find_package(phi-adapter-sdk-qt) is used."
 )
 option(PHI_ADAPTER_ONKYO_USE_LOCAL_ADAPTER_SDK
     "Use local ../phi-adapter-sdk checkout when available"
@@ -37,6 +33,7 @@ if(PHI_ADAPTER_ONKYO_BUILD_IPC)
     if(NOT TARGET phi::adapter-sdk)
         if(PHI_ADAPTER_ONKYO_USE_LOCAL_ADAPTER_SDK AND EXISTS "${PHI_ADAPTER_SDK_SOURCE_DIR}/CMakeLists.txt")
             message(STATUS "Using local phi-adapter-sdk from: ${PHI_ADAPTER_SDK_SOURCE_DIR}")
+            set(PHI_ADAPTER_SDK_BUILD_TESTS OFF CACHE BOOL "" FORCE)
             add_subdirectory("${PHI_ADAPTER_SDK_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/phi-adapter-sdk")
         else()
             message(STATUS "Using installed phi-adapter-sdk via find_package")
@@ -47,57 +44,56 @@ if(PHI_ADAPTER_ONKYO_BUILD_IPC)
     if(NOT TARGET phi::adapter-sdk)
         message(FATAL_ERROR "phi-adapter-sdk target phi::adapter-sdk not found")
     endif()
-    if(NOT TARGET phi::adapter-sdk-qt)
-        if(PHI_ADAPTER_ONKYO_USE_LOCAL_ADAPTER_SDK AND EXISTS "${PHI_ADAPTER_SDK_QT_SOURCE_DIR}/CMakeLists.txt")
-            message(STATUS "Using local phi-adapter-sdk-qt from: ${PHI_ADAPTER_SDK_QT_SOURCE_DIR}")
-            add_subdirectory("${PHI_ADAPTER_SDK_QT_SOURCE_DIR}" "${CMAKE_BINARY_DIR}/_deps/phi-adapter-sdk-qt")
-        else()
-            message(STATUS "Using installed phi-adapter-sdk-qt via find_package")
-            find_package(phi-adapter-sdk-qt CONFIG REQUIRED)
-        endif()
-    endif()
-    if(NOT TARGET phi::adapter-sdk-qt)
-        message(FATAL_ERROR "phi-adapter-sdk target phi::adapter-sdk-qt not found")
-    endif()
 
-    add_executable(phi_adapter_onkyo_ipc
-        src/main.cpp
+    # The receiver, split by what each part is about: the wire, the selector
+    # vocabulary, addressing, the connection, the queue, the state, the device
+    # descriptor, and the lifecycle that ties them together.
+    add_library(phi_adapter_onkyo_core STATIC
+        src/onkyo_devicemodel.cpp
+        src/onkyo_endpoint.cpp
+        src/onkyo_frames.cpp
+        src/onkyo_inputs.cpp
+        src/onkyo_instance.cpp
+        src/onkyo_iscp_client.cpp
+        src/onkyo_json.cpp
         src/onkyo_probe.cpp
-        src/onkyo_protocol.cpp
-        src/onkyo_runtime_convert.cpp
+        src/onkyo_queue.cpp
         src/onkyo_schema.cpp
-        src/onkyo_sidecar.cpp
+        src/onkyo_selector.cpp
+        src/onkyo_state.cpp
         src/onkyo_trace.cpp
     )
-
-    target_compile_features(phi_adapter_onkyo_ipc PRIVATE cxx_std_20)
-
-    target_link_libraries(phi_adapter_onkyo_ipc
-        PRIVATE
-            Qt6::Core
-            Qt6::Network
+    target_compile_features(phi_adapter_onkyo_core PUBLIC cxx_std_20)
+    set_target_properties(phi_adapter_onkyo_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(phi_adapter_onkyo_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(phi_adapter_onkyo_core
+        PUBLIC
             phi::adapter-sdk
-            phi::adapter-sdk-qt
+            nlohmann_json::nlohmann_json
     )
+
+    add_executable(phi_adapter_onkyo_ipc src/main.cpp)
+    target_link_libraries(phi_adapter_onkyo_ipc PRIVATE phi_adapter_onkyo_core)
+
+    enable_testing()
 
     # The eISCP wire and the selector vocabulary, tested without a receiver.
-    enable_testing()
-    add_executable(onkyo_protocol_tests
-        tests/onkyo_protocol_tests.cpp
-        src/onkyo_probe.cpp
-        src/onkyo_protocol.cpp
-        src/onkyo_trace.cpp
-    )
-    target_compile_features(onkyo_protocol_tests PRIVATE cxx_std_20)
-    target_include_directories(onkyo_protocol_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(onkyo_protocol_tests
-        PRIVATE
-            Qt6::Core
-            Qt6::Network
-            phi::adapter-sdk
-            phi::adapter-sdk-qt
-    )
-    add_test(NAME onkyo_protocol_tests COMMAND onkyo_protocol_tests)
+    add_executable(onkyo_wire_tests tests/onkyo_wire_tests.cpp)
+    target_link_libraries(onkyo_wire_tests PRIVATE phi_adapter_onkyo_core)
+    add_test(NAME onkyo_wire_tests COMMAND onkyo_wire_tests)
+
+    # Reporting, labels and ordering: the decisions, without the lifecycle.
+    add_executable(onkyo_behaviour_tests tests/onkyo_behaviour_tests.cpp)
+    target_link_libraries(onkyo_behaviour_tests PRIVATE phi_adapter_onkyo_core)
+    add_test(NAME onkyo_behaviour_tests COMMAND onkyo_behaviour_tests)
+
+    # The connection, against a stub receiver on a loopback port.
+    add_executable(onkyo_iscp_client_tests tests/onkyo_iscp_client_tests.cpp)
+    target_link_libraries(onkyo_iscp_client_tests PRIVATE phi_adapter_onkyo_core)
+    add_test(NAME onkyo_iscp_client_tests COMMAND onkyo_iscp_client_tests)
+
+    set_tests_properties(onkyo_wire_tests onkyo_behaviour_tests onkyo_iscp_client_tests
+        PROPERTIES TIMEOUT 120)
 
     set_target_properties(phi_adapter_onkyo_ipc PROPERTIES
         OUTPUT_NAME "phi_adapter_onkyo_ipc"

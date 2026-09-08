@@ -1,13 +1,17 @@
 #include "onkyo_schema.h"
 
-#include <QJsonArray>
-#include <QJsonValue>
+#include <string>
+#include <vector>
 
-#include "onkyo_protocol.h"
-#include "onkyo_runtime_convert.h"
+#include <cstdio>
+
+#include "phi/runtime/str.h"
+
+#include "onkyo_selector.h"
 
 namespace phicore::onkyo::ipc {
 
+namespace str = phi::str;
 namespace v1 = phicore::adapter::v1;
 
 namespace {
@@ -22,192 +26,165 @@ constexpr const char kOnkyoIconSvg[] =
     "<rect x=\"13\" y=\"13\" width=\"5\" height=\"1.6\" rx=\"0.8\" fill=\"#7A8AA4\"/>"
     "</svg>";
 
-QJsonArray schemaInputChoices(const QHash<QString, QString> &labels)
+/**
+ * @brief One choice per selector code the receiver could possibly report.
+ *
+ * All 256 of them, and a label field per code below, whether or not anything
+ * is known about it. That is deliberate - a user with an input this adapter
+ * has never heard of can still select it and name it - but it does mean the
+ * bootstrap schema is a few hundred fields wide for a receiver with six
+ * inputs. `configSchemaSize()` exists so the cost is a number rather than an
+ * impression.
+ */
+Json schemaInputChoices(const std::map<std::string, std::string> &labels)
 {
-    QJsonArray choices;
+    Json choices = Json::array();
     for (int code = 0; code <= 0xFF; ++code) {
-        const QString key = QStringLiteral("%1").arg(code, 2, 16, QLatin1Char('0')).toUpper();
-        const QString label = formatSliDisplayLabel(key, labels.value(key));
-        QJsonObject option;
-        option.insert(QStringLiteral("value"), key);
-        option.insert(QStringLiteral("label"), label);
-        choices.append(option);
+        char buffer[3];
+        std::snprintf(buffer, sizeof(buffer), "%02X", code);
+        const std::string key(buffer);
+        const auto known = labels.find(key);
+        choices.push_back(Json{
+            {"value", key},
+            {"label", formatSliDisplayLabel(key, known == labels.end() ? std::string()
+                                                                       : known->second)},
+        });
     }
     return choices;
 }
 
-QJsonObject buildConfigSchemaObject(const QHash<QString, QString> &labels)
+struct FieldSpec {
+    std::string key;
+    std::string type;
+    std::string label;
+    Json defaultValue = Json();
+    std::string actionId;
+    std::string actionLabel;
+    std::string parentActionId;
+    Json flags = Json::array();
+    Json choices = Json();
+    Json meta = Json::object();
+    Json layout = Json::object();
+};
+
+Json field(const FieldSpec &spec)
 {
-    auto field = [](QString key,
-                    QString type,
-                    QString label,
-                    QJsonValue defaultValue = QJsonValue(),
-                    QString actionId = QString(),
-                    QString actionLabel = QString(),
-                    QString parentActionId = QString(),
-                    QJsonArray flags = QJsonArray(),
-                    QJsonValue choices = QJsonValue(),
-                    QJsonObject meta = QJsonObject(),
-                    QJsonObject layout = QJsonObject()) {
-        QJsonObject obj;
-        obj.insert(QStringLiteral("key"), key);
-        obj.insert(QStringLiteral("type"), type);
-        obj.insert(QStringLiteral("label"), label);
-        if (!defaultValue.isUndefined() && !defaultValue.isNull())
-            obj.insert(QStringLiteral("default"), defaultValue);
-        if (!actionId.isEmpty())
-            obj.insert(QStringLiteral("actionId"), actionId);
-        if (!actionLabel.isEmpty())
-            obj.insert(QStringLiteral("actionLabel"), actionLabel);
-        if (!parentActionId.isEmpty())
-            obj.insert(QStringLiteral("parentActionId"), parentActionId);
-        if (!flags.isEmpty())
-            obj.insert(QStringLiteral("flags"), flags);
-        if (choices.isArray())
-            obj.insert(QStringLiteral("choices"), choices);
-        if (!meta.isEmpty())
-            obj.insert(QStringLiteral("meta"), meta);
-        if (!layout.isEmpty())
-            obj.insert(QStringLiteral("layout"), layout);
-        return obj;
-    };
-    auto action = [](QString id,
-                     QString label,
-                     QString description,
-                     bool hasForm,
-                     QJsonObject meta = QJsonObject()) {
-        QJsonObject obj;
-        obj.insert(QStringLiteral("id"), id);
-        obj.insert(QStringLiteral("label"), label);
-        obj.insert(QStringLiteral("description"), description);
-        obj.insert(QStringLiteral("hasForm"), hasForm);
-        if (!meta.isEmpty())
-            obj.insert(QStringLiteral("meta"), meta);
-        return obj;
-    };
+    Json obj = Json::object();
+    obj["key"] = spec.key;
+    obj["type"] = spec.type;
+    obj["label"] = spec.label;
+    if (!spec.defaultValue.is_null())
+        obj["default"] = spec.defaultValue;
+    if (!spec.actionId.empty())
+        obj["actionId"] = spec.actionId;
+    if (!spec.actionLabel.empty())
+        obj["actionLabel"] = spec.actionLabel;
+    if (!spec.parentActionId.empty())
+        obj["parentActionId"] = spec.parentActionId;
+    if (!spec.flags.empty())
+        obj["flags"] = spec.flags;
+    if (spec.choices.is_array())
+        obj["choices"] = spec.choices;
+    if (!spec.meta.empty())
+        obj["meta"] = spec.meta;
+    if (!spec.layout.empty())
+        obj["layout"] = spec.layout;
+    return obj;
+}
 
-    QJsonArray factoryFields;
-    factoryFields.append(field(QStringLiteral("host"), QStringLiteral("Hostname"), QStringLiteral("Host")));
-    factoryFields.append(field(QStringLiteral("iscpPort"),
-                               QStringLiteral("Port"),
-                               QStringLiteral("ISCP Port"),
-                               60128));
-    factoryFields.append(field(QStringLiteral("pollIntervalMs"),
-                               QStringLiteral("Integer"),
-                               QStringLiteral("Poll interval"),
-                               5000));
-    factoryFields.append(field(QStringLiteral("retryIntervalMs"),
-                               QStringLiteral("Integer"),
-                               QStringLiteral("Retry interval"),
-                               10000));
+Json action(const std::string &id, const std::string &label, const std::string &description,
+            bool hasForm, Json meta = Json::object())
+{
+    Json obj = Json::object();
+    obj["id"] = id;
+    obj["label"] = label;
+    obj["description"] = description;
+    obj["hasForm"] = hasForm;
+    if (!meta.empty())
+        obj["meta"] = meta;
+    return obj;
+}
 
-    const QJsonArray inputChoices = schemaInputChoices(labels);
+Json buildConfigSchemaObject(const std::map<std::string, std::string> &labels)
+{
+    Json factoryFields = Json::array();
+    factoryFields.push_back(field({.key = "host", .type = "Hostname", .label = "Host"}));
+    factoryFields.push_back(field({.key = "iscpPort", .type = "Port", .label = "ISCP Port",
+                                   .defaultValue = 60128}));
+    factoryFields.push_back(field({.key = "pollIntervalMs", .type = "Integer",
+                                   .label = "Poll interval", .defaultValue = 5000}));
+    factoryFields.push_back(field({.key = "retryIntervalMs", .type = "Integer",
+                                   .label = "Retry interval", .defaultValue = 10000}));
 
-    QJsonArray instanceFields;
-    instanceFields.append(field(QStringLiteral("volumeMaxRaw"),
-                                QStringLiteral("Integer"),
-                                QStringLiteral("Max volume raw"),
-                                160,
-                                QString(),
-                                QString(),
-                                QStringLiteral("settings"),
-                                QJsonArray{QStringLiteral("InstanceOnly")}));
-    instanceFields.append(field(QStringLiteral("activeSliCodes"),
-                                QStringLiteral("Select"),
-                                QStringLiteral("Active SLI codes"),
-                                QJsonArray(),
-                                QString(),
-                                QString(),
-                                QStringLiteral("settings"),
-                                QJsonArray{QStringLiteral("Multi"), QStringLiteral("InstanceOnly")},
-                                inputChoices,
-                                QJsonObject{{QStringLiteral("reloadActionLayoutOnChange"), true}}));
-    instanceFields.append(field(QStringLiteral("currentInputCode"),
-                                QStringLiteral("String"),
-                                QStringLiteral("Current input (SLI)"),
-                                QJsonValue(),
-                                QStringLiteral("probeCurrentInput"),
-                                QStringLiteral("Probe current"),
-                                QStringLiteral("settings"),
-                                QJsonArray{
-                                    QStringLiteral("ReadOnly"),
-                                    QStringLiteral("Transient"),
-                                    QStringLiteral("InstanceOnly"),
-                                },
-                                QJsonValue(),
-                                QJsonObject{
-                                    {QStringLiteral("appendTo"), QStringLiteral("activeSliCodes")},
-                                },
-                                QJsonObject{{QStringLiteral("actionPosition"), QStringLiteral("inline")}}));
+    const Json inputChoices = schemaInputChoices(labels);
 
-    for (const QJsonValue &choiceValue : inputChoices) {
-        if (!choiceValue.isObject())
+    Json instanceFields = Json::array();
+    instanceFields.push_back(field({.key = "volumeMaxRaw", .type = "Integer",
+                                    .label = "Max volume raw", .defaultValue = 160,
+                                    .parentActionId = "settings",
+                                    .flags = Json::array({"InstanceOnly"})}));
+    instanceFields.push_back(field({.key = "activeSliCodes", .type = "Select",
+                                    .label = "Active SLI codes",
+                                    .defaultValue = Json::array(),
+                                    .parentActionId = "settings",
+                                    .flags = Json::array({"Multi", "InstanceOnly"}),
+                                    .choices = inputChoices,
+                                    .meta = Json{{"reloadActionLayoutOnChange", true}}}));
+    instanceFields.push_back(field({.key = "currentInputCode", .type = "String",
+                                    .label = "Current input (SLI)",
+                                    .actionId = "probeCurrentInput",
+                                    .actionLabel = "Probe current",
+                                    .parentActionId = "settings",
+                                    .flags = Json::array({"ReadOnly", "Transient",
+                                                          "InstanceOnly"}),
+                                    .meta = Json{{"appendTo", "activeSliCodes"}},
+                                    .layout = Json{{"actionPosition", "inline"}}}));
+
+    for (const Json &choice : inputChoices) {
+        if (!choice.is_object())
             continue;
-        const QJsonObject choiceObj = choiceValue.toObject();
-        const QString key = normalizeSliCode(choiceObj.value(QStringLiteral("value")).toString());
-        if (key.isEmpty())
+        const std::string key = normalizeSliCode(jsonString(choice, "value"));
+        if (key.empty())
             continue;
-        QJsonObject mappingField = field(QStringLiteral("inputLabel_%1").arg(key),
-                                         QStringLiteral("String"),
-                                         QStringLiteral("SLI %1 label").arg(key),
-                                         labels.value(key),
-                                         QString(),
-                                         QString(),
-                                         QStringLiteral("settings"),
-                                         QJsonArray{QStringLiteral("InstanceOnly")});
-        mappingField.insert(QStringLiteral("visibility"),
-                            QJsonObject{
-                                {QStringLiteral("fieldKey"), QStringLiteral("activeSliCodes")},
-                                {QStringLiteral("op"), QStringLiteral("contains")},
-                                {QStringLiteral("value"), key},
-                            });
-        instanceFields.append(mappingField);
+        const auto known = labels.find(key);
+        Json mappingField = field({.key = "inputLabel_" + key,
+                                   .type = "String",
+                                   .label = "SLI " + key + " label",
+                                   .defaultValue = known == labels.end() ? Json()
+                                                                         : Json(known->second),
+                                   .parentActionId = "settings",
+                                   .flags = Json::array({"InstanceOnly"})});
+        mappingField["visibility"] = Json{
+            {"fieldKey", "activeSliCodes"},
+            {"op", "contains"},
+            {"value", key},
+        };
+        instanceFields.push_back(std::move(mappingField));
     }
 
-    QJsonObject factorySection;
-    factorySection.insert(QStringLiteral("title"), QStringLiteral("Connection"));
-    factorySection.insert(QStringLiteral("fields"), factoryFields);
-    factorySection.insert(QStringLiteral("actions"),
-                          QJsonArray{
-                              action(QStringLiteral("probe"),
-                                     QStringLiteral("Test connection"),
-                                     QStringLiteral("Validate receiver reachability using the current config values."),
-                                     false,
-                                     QJsonObject{
-                                         {QStringLiteral("placement"), QStringLiteral("card")},
-                                         {QStringLiteral("kind"), QStringLiteral("command")},
-                                         {QStringLiteral("requiresAck"), true},
-                                     }),
-                          });
+    Json factorySection = Json::object();
+    factorySection["title"] = "Connection";
+    factorySection["fields"] = factoryFields;
+    factorySection["actions"] = Json::array({
+        action("probe", "Test connection",
+               "Validate receiver reachability using the current config values.", false,
+               Json{{"placement", "card"}, {"kind", "command"}, {"requiresAck", true}}),
+    });
 
-    QJsonObject instanceSection;
-    instanceSection.insert(QStringLiteral("title"), QStringLiteral("Settings"));
-    instanceSection.insert(QStringLiteral("fields"), instanceFields);
-    instanceSection.insert(QStringLiteral("actions"),
-                           QJsonArray{
-                               action(QStringLiteral("settings"),
-                                      QStringLiteral("Settings"),
-                                      QStringLiteral("Update adapter settings."),
-                                      true,
-                                      QJsonObject{
-                                          {QStringLiteral("placement"), QStringLiteral("card")},
-                                          {QStringLiteral("kind"), QStringLiteral("open_dialog")},
-                                          {QStringLiteral("requiresAck"), true},
-                                      }),
-                               action(QStringLiteral("probeCurrentInput"),
-                                      QStringLiteral("Probe current"),
-                                      QStringLiteral("Probe current input and refresh labels."),
-                                      false,
-                                      QJsonObject{
-                                          {QStringLiteral("placement"), QStringLiteral("form_field")},
-                                          {QStringLiteral("kind"), QStringLiteral("command")},
-                                          {QStringLiteral("requiresAck"), true},
-                                      }),
-                           });
+    Json instanceSection = Json::object();
+    instanceSection["title"] = "Settings";
+    instanceSection["fields"] = instanceFields;
+    instanceSection["actions"] = Json::array({
+        action("settings", "Settings", "Update adapter settings.", true,
+               Json{{"placement", "card"}, {"kind", "open_dialog"}, {"requiresAck", true}}),
+        action("probeCurrentInput", "Probe current", "Probe current input and refresh labels.",
+               false,
+               Json{{"placement", "form_field"}, {"kind", "command"}, {"requiresAck", true}}),
+    });
 
-    QJsonObject schema;
-    schema.insert(QStringLiteral("factory"), factorySection);
-    schema.insert(QStringLiteral("instance"), instanceSection);
+    Json schema = Json::object();
+    schema["factory"] = factorySection;
+    schema["instance"] = instanceSection;
     return schema;
 }
 
@@ -262,20 +239,16 @@ v1::AdapterCapabilities capabilities()
     return caps;
 }
 
-v1::JsonText configSchemaJson(const QHash<QString, QString> &labels)
+v1::JsonText configSchemaJson(const std::map<std::string, std::string> &labels)
 {
-    return toJson(buildConfigSchemaObject(labels));
+    return dump(buildConfigSchemaObject(labels));
 }
 
-QJsonArray optionsToChoiceJson(const v1::AdapterConfigOptionList &options)
+Json optionsToChoiceJson(const v1::AdapterConfigOptionList &options)
 {
-    QJsonArray out;
-    for (const v1::AdapterConfigOption &option : options) {
-        QJsonObject choice;
-        choice.insert(QStringLiteral("value"), QString::fromStdString(option.value));
-        choice.insert(QStringLiteral("label"), QString::fromStdString(option.label));
-        out.append(choice);
-    }
+    Json out = Json::array();
+    for (const v1::AdapterConfigOption &option : options)
+        out.push_back(Json{{"value", option.value}, {"label", option.label}});
     return out;
 }
 

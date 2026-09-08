@@ -1,29 +1,31 @@
 #pragma once
 
-// Reachability probe for the factory's "Test connection" action. Blocking by
-// nature (a TCP connect), which is why the factory runs it on its own execution
-// backend rather than on the host poll thread.
+// Reachability for the factory's "Test connection" action.
+//
+// Blocking by nature - it is one TCP connect and nothing else - which is why
+// the factory runs it on its own execution backend rather than on the host
+// poll thread. It stays blocking rather than borrowing the instance's loop:
+// the factory has no loop of its own, and one connect with a deadline needs
+// none.
 
+#include <chrono>
 #include <cstdint>
-
-#include <QJsonObject>
-#include <QString>
-#include <QStringList>
+#include <functional>
+#include <string>
 
 namespace phicore::onkyo::ipc {
 
-/// Candidate hosts from the action params, IP literals first, deduplicated.
-QStringList resolveProbeHosts(const QJsonObject &params);
-
-/// `iscpPort` from the action params; 0 when absent or unusable.
-std::uint16_t resolveProbePort(const QJsonObject &params);
-
 /**
- * @brief One blocking connect attempt against a single candidate.
+ * @brief One connect attempt against a single candidate.
  *
- * Costs up to ~900 ms. Callers walking several candidates must check
- * `stopRequested()` between them so a shutdown is not spent on the rest.
+ * @param cancelled Polled while waiting; a probe walking several candidates
+ *        must be able to give the rest up when the sidecar is shutting down.
+ * @return whether the receiver accepted a connection.
  */
-bool probeEndpoint(const QString &host, std::uint16_t port, QString *errorMessage);
+bool probeEndpoint(const std::string &host,
+                   std::uint16_t port,
+                   std::chrono::milliseconds timeout,
+                   const std::function<bool()> &cancelled,
+                   std::string *errorMessage);
 
 } // namespace phicore::onkyo::ipc

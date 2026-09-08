@@ -1,8 +1,7 @@
 #include "onkyo_trace.h"
 
+#include <chrono>
 #include <iostream>
-
-#include <QDateTime>
 
 namespace phicore::onkyo::ipc {
 
@@ -15,21 +14,22 @@ constexpr bool kTimingLogsEnabled = true;
 
 std::int64_t nowMs()
 {
-    return QDateTime::currentMSecsSinceEpoch();
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
-void trace(const QString &message)
+void trace(std::string_view message)
 {
     if (!kTraceEnabled)
         return;
-    std::cerr << "[" << nowMs() << "] onkyo-ipc: " << message.toStdString() << '\n';
+    std::cerr << "[" << nowMs() << "] onkyo-ipc: " << message << '\n';
 }
 
-void timingLog(const QString &message)
+void timingLog(std::string_view message)
 {
     if (!kTimingLogsEnabled)
         return;
-    std::cerr << "[" << nowMs() << "] onkyo-ipc[timing]: " << message.toStdString() << '\n';
+    std::cerr << "[" << nowMs() << "] onkyo-ipc[timing]: " << message << '\n';
 }
 
 } // namespace phicore::onkyo::ipc
