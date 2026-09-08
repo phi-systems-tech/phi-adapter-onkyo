@@ -1,71 +1,22 @@
-phi-adapter-onkyo (0.0~git202608301437.0786fd8-1) trixie; urgency=medium
+phi-adapter-onkyo (0.0~git202609080955.3d3452f-1) trixie; urgency=medium
 
-  * Carries the eISCP wire and selector test suite added on 24 August.
+  * No Qt. The loop, the timers and the strings come from phi-runtime through
+    the SDK's loop execution backend; JSON is nlohmann, as in phi-core.
+  * The eISCP frame scanner could stand still on a frame declaring zero sizes,
+    taking the instance thread with it until the host gave up and leaked the
+    instance. It always moves forward now, and an impossible length ends the
+    scan rather than being stepped over.
+  * The poll preemption the README described could never fire: the callbacks
+    that would have interrupted a poll were posted to the thread the poll was
+    blocking. Nothing blocks the loop any more.
+  * An input code is two hex digits. Anything else used to go out as
+    SLI<whatever> and come back a success nothing had confirmed.
+  * A superseded volume write is answered as superseded, not as a success for
+    a command that was never sent; the active-code list keeps its order; a
+    host that is not yet an address is tried instead of dropped; a port stored
+    as text is read as a port.
+  * The 1750-line sidecar is twelve units, and the frame scanner, the queue
+    and the reporting rules have tests that do not need a receiver.
 
- -- Marius Schumacher <google@phisys.com>  Sun, 30 Aug 2026 14:37:12 +0200
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Tue, 08 Sep 2026 09:55:01 +0200
 
-phi-adapter-onkyo (0.0~git202608211608.fb49307-1) trixie; urgency=medium
-
-  * Rebuild against phi-adapter-sdk-qt 0.6.1: Adapter::port is initialised, so an
-    adapter built field by field no longer carries a stray port.
- -- Marius Schumacher <marius.schumacher@phisys.com>  Fri, 21 Aug 2026 16:08:03 +0200
-
-phi-adapter-onkyo (0.0~git202608201112.3c817e8-1) trixie; urgency=medium
-
-  * Split the single-translation-unit sidecar into onkyo_protocol, onkyo_schema,
-    onkyo_probe, onkyo_runtime_convert, onkyo_trace, onkyo_sidecar and main (F-34).
-    The instance class is private to its .cpp behind makeInstance().
-  * Fold the three copies of the plain-frame command sequence into buildPlainFrame().
-  * No behaviour change: the factory descriptor and the config.changed frames are
-    byte-identical to the pre-split binary.
-
- -- Marius Schumacher <marius.schumacher@phisys.com>  Thu, 20 Aug 2026 11:12:25 +0200
-
-phi-adapter-onkyo (0.0~git202608192326.e83a1cb-1) trixie; urgency=medium
-
-  * Rebuild against phi-adapter-sdk 0.6.0: the log vocabulary was renumbered and
-    the enum values cross the library boundary by value (F-39).
-
- -- Marius Schumacher <marius.schumacher@phisys.com>  Wed, 19 Aug 2026 23:26:08 +0200
-
-phi-adapter-onkyo (0.0~git202608191934.4d24591-1) trixie; urgency=medium
-
-  * Honour the host's stop request in the blocking ISCP connect/read loops, the
-    poll batch and the factory probe, instead of waiting out the connect and
-    response budgets (F-33).
-  * Rebuild against phi-adapter-sdk 0.5.0.
-
- -- Marius Schumacher <marius.schumacher@phisys.com>  Wed, 19 Aug 2026 18:10:56 +0200
-
-phi-adapter-onkyo (0.0~git20260819.6a22dc7-1) trixie; urgency=medium
-
-  * Run the receiver probe on a factory execution backend instead of the host poll
-    thread, so a multi-host probe no longer stalls IPC for seconds (F-31).
-  * Rebuild against phi-adapter-sdk 0.4.0 (AdapterFactory vtable change).
-
- -- Marius Schumacher <marius.schumacher@phisys.com>  Wed, 19 Aug 2026 16:49:03 +0200
-
-phi-adapter-onkyo (0.0~git20260819.61d801c-1) trixie; urgency=medium
-
-  * Drive the sidecar from the SDK main loop (no poll interval, no idle wakeups).
-  * Rebuild against phi-adapter-sdk 0.3.0 (ABI change).
-
- -- Marius Schumacher <marius.schumacher@phisys.com>  Wed, 19 Aug 2026 13:56:11 +0200
-
-phi-adapter-onkyo (0.0~git20260818.64d7ad4-1) trixie; urgency=medium
-
-  * Rebuild against phi-adapter-sdk 0.2.0 (ABI/wire changes).
-
- -- Marius Schumacher <marius.schumacher@phisys.com>  Tue, 18 Aug 2026 19:16:32 +0200
-
-phi-adapter-onkyo (0.0~git20260307-2) trixie; urgency=medium
-
-  * Add explicit runtime dependencies on phi-adapter-sdk and phi-adapter-sdk-qt.
-
- -- Marius Schumacher <marius.schumacher@phisys.com>  Sun, 15 Mar 2026 21:20:00 +0100
-
-phi-adapter-onkyo (0.0~git20260307-1) trixie; urgency=medium
-
-  * Initial Debian packaging for phi-adapter-onkyo.
-
- -- Marius Schumacher <marius.schumacher@phisys.com>  Sat, 07 Mar 2026 10:40:00 +0100
