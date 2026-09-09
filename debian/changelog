@@ -1,3 +1,10 @@
+phi-adapter-onkyo (0.0~git202609090901.9f85d37-1) trixie; urgency=medium
+
+  * The SLI labels are read from the cached bootstrap on the host
+    thread, not from a member written on the factory thread
+
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Wed, 09 Sep 2026 09:01:51 +0200
+
 phi-adapter-onkyo (0.0~git202609081042.8cb7ec9-1) trixie; urgency=medium
 
   * A query is answered when its own answer arrives, not when any frame does,
