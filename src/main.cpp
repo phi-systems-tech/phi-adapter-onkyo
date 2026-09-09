@@ -36,13 +36,17 @@ constexpr auto kProbeTimeout = 900ms;
 class OnkyoIpcFactory final : public sdk::AdapterFactory
 {
 protected:
-    void onBootstrap(const sdk::BootstrapRequest &request) override
+    /// The SLI labels from the static config core sent at bootstrap. Read
+    /// where they are needed, from the payload the host thread cached:
+    /// onBootstrap runs on the factory backend thread, createInstance() and
+    /// configSchemaJson() on the host thread, and core does not wait for the
+    /// bootstrap reply before creating an instance. A member written in
+    /// onBootstrap was empty in createInstance once (tuya, 2026-09-09).
+    std::map<std::string, std::string> schemaInputLabels() const
     {
-        // Runs on the factory backend thread; the SDK sends the bootstrap
-        // descriptor from the same task, so configSchemaJson() and
-        // createInstance() (host thread, both reachable only after that reply)
-        // see the labels written here.
-        m_schemaInputLabels = loadConfiguredSliLabels(parseObject(request.staticConfigJson));
+        if (!hasBootstrap())
+            return {};
+        return loadConfiguredSliLabels(parseObject(bootstrap().staticConfigJson));
     }
 
     void onFactoryConfigChanged(const sdk::ConfigChangedRequest &request) override
@@ -65,7 +69,7 @@ protected:
 
     v1::JsonText configSchemaJson() const override
     {
-        return phicore::onkyo::ipc::configSchemaJson(m_schemaInputLabels);
+        return phicore::onkyo::ipc::configSchemaJson(schemaInputLabels());
     }
 
     // handleFactoryActionInvoke() probes every candidate host with a blocking
@@ -88,7 +92,7 @@ protected:
     std::unique_ptr<sdk::AdapterInstance> createInstance(const sdk::ExternalId &externalId) override
     {
         std::cerr << "create onkyo instance externalId=" << externalId << '\n';
-        return makeInstance(m_schemaInputLabels);
+        return makeInstance(schemaInputLabels());
     }
 
     void onFactoryActionInvoke(const sdk::AdapterActionInvokeRequest &request) override
@@ -149,7 +153,6 @@ private:
         return response;
     }
 
-    std::map<std::string, std::string> m_schemaInputLabels;
 };
 
 } // namespace
