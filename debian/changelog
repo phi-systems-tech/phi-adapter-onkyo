@@ -1,3 +1,9 @@
+phi-adapter-onkyo (0.0~git202609151747.1c6c08f-1) trixie; urgency=medium
+
+  * Built against SDK 0.17.
+
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Tue, 15 Sep 2026 17:47:22 +0200
+
 phi-adapter-onkyo (0.0~git202609151615.0076026-1) trixie; urgency=medium
 
   * No action kind (SDK 0.16)
