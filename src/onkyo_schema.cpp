@@ -158,7 +158,6 @@ v1::AdapterCapabilities capabilities()
     settings.description = "Update adapter settings.";
     settings.hasForm = true;
     settings.formLayout.columns = 2;
-    settings.kind = v1::AdapterActionKind::OpenDialog;
     caps.instanceActions.push_back(settings);
 
     v1::AdapterActionDescriptor probeCurrent;
