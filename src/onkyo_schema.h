@@ -27,7 +27,7 @@ phicore::adapter::v1::AdapterCapabilities capabilities();
  * and the per-code label fields are generated from the labels the factory read
  * at bootstrap.
  */
-phicore::adapter::v1::JsonText configSchemaJson(const std::map<std::string, std::string> &labels);
+phicore::adapter::v1::AdapterConfigSchema configSchema(const std::map<std::string, std::string> &labels);
 
 /// SDK option list -> `{value,label}` array, for schema-shaped channel metadata.
 Json optionsToChoiceJson(const phicore::adapter::v1::AdapterConfigOptionList &options);

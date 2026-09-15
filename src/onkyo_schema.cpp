@@ -1,6 +1,7 @@
 #include "onkyo_schema.h"
 
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <cstdio>
@@ -36,155 +37,87 @@ constexpr const char kOnkyoIconSvg[] =
  * inputs. `configSchemaSize()` exists so the cost is a number rather than an
  * impression.
  */
-Json schemaInputChoices(const std::map<std::string, std::string> &labels)
+v1::AdapterConfigOptionList schemaInputChoices(const std::map<std::string, std::string> &labels)
 {
-    Json choices = Json::array();
+    v1::AdapterConfigOptionList choices;
     for (int code = 0; code <= 0xFF; ++code) {
         char buffer[3];
         std::snprintf(buffer, sizeof(buffer), "%02X", code);
         const std::string key(buffer);
         const auto known = labels.find(key);
-        choices.push_back(Json{
-            {"value", key},
-            {"label", formatSliDisplayLabel(key, known == labels.end() ? std::string()
-                                                                       : known->second)},
-        });
+        choices.push_back({key, formatSliDisplayLabel(key, known == labels.end() ? std::string() : known->second)});
     }
     return choices;
 }
 
-struct FieldSpec {
-    std::string key;
-    std::string type;
-    std::string label;
-    Json defaultValue = Json();
-    std::string actionId;
-    std::string actionLabel;
-    std::string parentActionId;
-    Json flags = Json::array();
-    Json choices = Json();
-    Json meta = Json::object();
-    Json layout = Json::object();
-};
-
-Json field(const FieldSpec &spec)
+v1::AdapterConfigField field(const std::string &key, v1::AdapterConfigFieldType type, const std::string &label,
+                             v1::ScalarValue defaultValue = {})
 {
-    Json obj = Json::object();
-    obj["key"] = spec.key;
-    obj["type"] = spec.type;
-    obj["label"] = spec.label;
-    if (!spec.defaultValue.is_null())
-        obj["default"] = spec.defaultValue;
-    if (!spec.actionId.empty())
-        obj["actionId"] = spec.actionId;
-    if (!spec.actionLabel.empty())
-        obj["actionLabel"] = spec.actionLabel;
-    if (!spec.parentActionId.empty())
-        obj["parentActionId"] = spec.parentActionId;
-    if (!spec.flags.empty())
-        obj["flags"] = spec.flags;
-    if (spec.choices.is_array())
-        obj["choices"] = spec.choices;
-    if (!spec.meta.empty())
-        obj["meta"] = spec.meta;
-    if (!spec.layout.empty())
-        obj["layout"] = spec.layout;
-    return obj;
+    v1::AdapterConfigField out;
+    out.key = key;
+    out.type = type;
+    out.label = label;
+    out.defaultValue = std::move(defaultValue);
+    return out;
 }
 
-Json action(const std::string &id, const std::string &label, const std::string &description,
-            bool hasForm, Json meta = Json::object())
+v1::AdapterConfigSchema buildConfigSchema(const std::map<std::string, std::string> &labels)
 {
-    Json obj = Json::object();
-    obj["id"] = id;
-    obj["label"] = label;
-    obj["description"] = description;
-    obj["hasForm"] = hasForm;
-    if (!meta.empty())
-        obj["meta"] = meta;
-    return obj;
-}
+    using Type = v1::AdapterConfigFieldType;
+    using Flag = v1::AdapterConfigFieldFlag;
+    v1::AdapterConfigSchema schema;
 
-Json buildConfigSchemaObject(const std::map<std::string, std::string> &labels)
-{
-    Json factoryFields = Json::array();
-    factoryFields.push_back(field({.key = "host", .type = "Hostname", .label = "Host"}));
-    factoryFields.push_back(field({.key = "iscpPort", .type = "Port", .label = "ISCP Port",
-                                   .defaultValue = 60128}));
-    factoryFields.push_back(field({.key = "pollIntervalMs", .type = "Integer",
-                                   .label = "Poll interval", .defaultValue = 5000}));
-    factoryFields.push_back(field({.key = "retryIntervalMs", .type = "Integer",
-                                   .label = "Retry interval", .defaultValue = 10000}));
+    v1::AdapterConfigSection &factory = schema.factory;
+    factory.title = "Connection";
+    factory.layout.columns = 2;
+    v1::AdapterConfigField port = field("iscpPort", Type::Port, "ISCP Port", std::int64_t{60128});
+    port.layout.controlWidth = v1::AdapterConfigSize::Narrow;
+    v1::AdapterConfigField poll = field("pollIntervalMs", Type::Integer, "Poll interval", std::int64_t{5000});
+    poll.layout.controlWidth = v1::AdapterConfigSize::Narrow;
+    v1::AdapterConfigField retry = field("retryIntervalMs", Type::Integer, "Retry interval", std::int64_t{10000});
+    retry.layout.controlWidth = v1::AdapterConfigSize::Narrow;
+    factory.fields = {field("host", Type::Hostname, "Host"), port, poll, retry};
 
-    const Json inputChoices = schemaInputChoices(labels);
+    // The settings dialog is two columns: the selection and the probe across
+    // both, the label of every selected input one cell each.
+    v1::AdapterConfigSection &instance = schema.instance;
+    instance.title = "Settings";
+    auto settingsField = [](v1::AdapterConfigField value, v1::AdapterConfigFieldFlags flags) {
+        value.parentActionId = "settings";
+        value.flags = flags;
+        return value;
+    };
 
-    Json instanceFields = Json::array();
-    instanceFields.push_back(field({.key = "volumeMaxRaw", .type = "Integer",
-                                    .label = "Max volume raw", .defaultValue = 160,
-                                    .parentActionId = "settings",
-                                    .flags = Json::array({"InstanceOnly"})}));
-    instanceFields.push_back(field({.key = "activeSliCodes", .type = "Select",
-                                    .label = "Active SLI codes",
-                                    .defaultValue = Json::array(),
-                                    .parentActionId = "settings",
-                                    .flags = Json::array({"Multi", "InstanceOnly"}),
-                                    .choices = inputChoices,
-                                    .meta = Json{{"reloadActionLayoutOnChange", true}}}));
-    instanceFields.push_back(field({.key = "currentInputCode", .type = "String",
-                                    .label = "Current input (SLI)",
-                                    .actionId = "probeCurrentInput",
-                                    .actionLabel = "Probe current",
-                                    .parentActionId = "settings",
-                                    .flags = Json::array({"ReadOnly", "Transient",
-                                                          "InstanceOnly"}),
-                                    .meta = Json{{"appendTo", "activeSliCodes"}},
-                                    .layout = Json{{"actionPosition", "inline"}}}));
+    v1::AdapterConfigField volume =
+        settingsField(field("volumeMaxRaw", Type::Integer, "Max volume raw", std::int64_t{160}), Flag::InstanceOnly);
+    volume.layout.controlWidth = v1::AdapterConfigSize::Narrow;
+    v1::AdapterConfigField active =
+        settingsField(field("activeSliCodes", Type::Select, "Active SLI codes"), Flag::Multi | Flag::InstanceOnly);
+    active.options = schemaInputChoices(labels);
+    active.metaJson = R"({"reloadActionLayoutOnChange":true})";
+    active.layout.cells = 2;
+    active.layout.newRow = true;
+    v1::AdapterConfigField current = settingsField(field("currentInputCode", Type::String, "Current input (SLI)"),
+                                                   Flag::ReadOnly | Flag::Transient | Flag::InstanceOnly);
+    current.actions = {{"probeCurrentInput", "Probe current"}};
+    current.metaJson = R"({"appendTo":"activeSliCodes"})";
+    current.layout.cells = 2;
+    instance.fields = {volume, active, current};
 
-    for (const Json &choice : inputChoices) {
-        if (!choice.is_object())
-            continue;
-        const std::string key = normalizeSliCode(jsonString(choice, "value"));
+    for (const v1::AdapterConfigOption &choice : active.options) {
+        const std::string key = normalizeSliCode(choice.value);
         if (key.empty())
             continue;
         const auto known = labels.find(key);
-        Json mappingField = field({.key = "inputLabel_" + key,
-                                   .type = "String",
-                                   .label = "SLI " + key + " label",
-                                   .defaultValue = known == labels.end() ? Json()
-                                                                         : Json(known->second),
-                                   .parentActionId = "settings",
-                                   .flags = Json::array({"InstanceOnly"})});
-        mappingField["visibility"] = Json{
-            {"fieldKey", "activeSliCodes"},
-            {"op", "contains"},
-            {"value", key},
-        };
-        instanceFields.push_back(std::move(mappingField));
+        v1::AdapterConfigField mapping = settingsField(
+            field("inputLabel_" + key, Type::String, "SLI " + key + " label",
+                  known == labels.end() ? v1::ScalarValue() : v1::ScalarValue(known->second)),
+            Flag::InstanceOnly);
+        mapping.visibility.fieldKey = "activeSliCodes";
+        mapping.visibility.op = v1::AdapterConfigVisibilityOp::Contains;
+        mapping.visibility.value = key;
+        instance.fields.push_back(std::move(mapping));
     }
-
-    Json factorySection = Json::object();
-    factorySection["title"] = "Connection";
-    factorySection["fields"] = factoryFields;
-    factorySection["actions"] = Json::array({
-        action("probe", "Test connection",
-               "Validate receiver reachability using the current config values.", false,
-               Json{{"placement", "card"}, {"kind", "command"}, {"requiresAck", true}}),
-    });
-
-    Json instanceSection = Json::object();
-    instanceSection["title"] = "Settings";
-    instanceSection["fields"] = instanceFields;
-    instanceSection["actions"] = Json::array({
-        action("settings", "Settings", "Update adapter settings.", true,
-               Json{{"placement", "card"}, {"kind", "open_dialog"}, {"requiresAck", true}}),
-        action("probeCurrentInput", "Probe current", "Probe current input and refresh labels.",
-               false,
-               Json{{"placement", "form_field"}, {"kind", "command"}, {"requiresAck", true}}),
-    });
-
-    Json schema = Json::object();
-    schema["factory"] = factorySection;
-    schema["instance"] = instanceSection;
     return schema;
 }
 
@@ -225,6 +158,7 @@ v1::AdapterCapabilities capabilities()
     settings.label = "Settings";
     settings.description = "Update adapter settings.";
     settings.hasForm = true;
+    settings.formLayout.columns = 2;
     settings.metaJson = R"({"placement":"card","kind":"open_dialog","requiresAck":true})";
     caps.instanceActions.push_back(settings);
 
@@ -239,9 +173,9 @@ v1::AdapterCapabilities capabilities()
     return caps;
 }
 
-v1::JsonText configSchemaJson(const std::map<std::string, std::string> &labels)
+v1::AdapterConfigSchema configSchema(const std::map<std::string, std::string> &labels)
 {
-    return dump(buildConfigSchemaObject(labels));
+    return buildConfigSchema(labels);
 }
 
 Json optionsToChoiceJson(const v1::AdapterConfigOptionList &options)

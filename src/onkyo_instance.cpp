@@ -665,12 +665,16 @@ private:
         response.status = v1::CmdStatus::Success;
         response.resultType = v1::ActionResultType::String;
         response.resultValue = code;
-        response.formValuesJson = dump(Json{
-            {"activeSliCodes", activeArray},
-            {"currentInputCode", code},
-        });
-        response.fieldChoicesJson =
-            dump(Json{{"activeSliCodes", optionsToChoiceJson(m_inputs.choices())}});
+        v1::ScalarList activeCodes;
+        for (const Json &entry : activeArray) {
+            if (entry.is_string())
+                activeCodes.emplace_back(entry.get<std::string>());
+        }
+        response.formValues = {
+            {"activeSliCodes", activeCodes},
+            {"currentInputCode", v1::ScalarValue(code)},
+        };
+        response.fieldChoices = {{"activeSliCodes", m_inputs.choices()}};
         response.reloadLayout = true;
 
         sendMetaPatch(patch, "probeCurrentInput");

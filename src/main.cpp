@@ -39,7 +39,7 @@ protected:
     /// The SLI labels from the static config core sent at bootstrap. Read
     /// where they are needed, from the payload the host thread cached:
     /// onBootstrap runs on the factory backend thread, createInstance() and
-    /// configSchemaJson() on the host thread, and core does not wait for the
+    /// configSchema() on the host thread, and core does not wait for the
     /// bootstrap reply before creating an instance. A member written in
     /// onBootstrap was empty in createInstance once (tuya, 2026-09-09).
     std::map<std::string, std::string> schemaInputLabels() const
@@ -67,9 +67,9 @@ protected:
         return phicore::onkyo::ipc::capabilities();
     }
 
-    v1::JsonText configSchemaJson() const override
+    std::optional<v1::AdapterConfigSchema> configSchema() const override
     {
-        return phicore::onkyo::ipc::configSchemaJson(schemaInputLabels());
+        return phicore::onkyo::ipc::configSchema(schemaInputLabels());
     }
 
     // handleFactoryActionInvoke() probes every candidate host with a blocking
