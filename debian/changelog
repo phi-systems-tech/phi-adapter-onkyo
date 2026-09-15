@@ -1,3 +1,9 @@
+phi-adapter-onkyo (0.0~git202609151321.a4f05f5-1) trixie; urgency=medium
+
+  * Schema and probe answer through the SDK; input labels two to a row.
+
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Tue, 15 Sep 2026 13:21:04 +0200
+
 phi-adapter-onkyo (0.0~git202609090901.9f85d37-1) trixie; urgency=medium
 
   * The SLI labels are read from the cached bootstrap on the host
