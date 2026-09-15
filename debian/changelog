@@ -1,3 +1,9 @@
+phi-adapter-onkyo (0.0~git202609151615.0076026-1) trixie; urgency=medium
+
+  * No action kind (SDK 0.16)
+
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Tue, 15 Sep 2026 16:15:49 +0200
+
 phi-adapter-onkyo (0.0~git202609151500.c6faeff-1) trixie; urgency=medium
 
   * Typed actions, field parameters and meta patches
