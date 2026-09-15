@@ -94,13 +94,13 @@ v1::AdapterConfigSchema buildConfigSchema(const std::map<std::string, std::strin
     v1::AdapterConfigField active =
         settingsField(field("activeSliCodes", Type::Select, "Active SLI codes"), Flag::Multi | Flag::InstanceOnly);
     active.options = schemaInputChoices(labels);
-    active.metaJson = R"({"reloadActionLayoutOnChange":true})";
+    active.reloadsForm = true;
     active.layout.cells = 2;
     active.layout.newRow = true;
     v1::AdapterConfigField current = settingsField(field("currentInputCode", Type::String, "Current input (SLI)"),
                                                    Flag::ReadOnly | Flag::Transient | Flag::InstanceOnly);
     current.actions = {{"probeCurrentInput", "Probe current"}};
-    current.metaJson = R"({"appendTo":"activeSliCodes"})";
+    current.appendTo = "activeSliCodes";
     current.layout.cells = 2;
     instance.fields = {volume, active, current};
 
@@ -150,7 +150,6 @@ v1::AdapterCapabilities capabilities()
     probe.label = "Test connection";
     probe.description = "Validate receiver reachability using the current config values.";
     probe.hasForm = false;
-    probe.metaJson = R"({"placement":"card","kind":"command","requiresAck":true})";
     caps.factoryActions.push_back(probe);
 
     v1::AdapterActionDescriptor settings;
@@ -159,7 +158,7 @@ v1::AdapterCapabilities capabilities()
     settings.description = "Update adapter settings.";
     settings.hasForm = true;
     settings.formLayout.columns = 2;
-    settings.metaJson = R"({"placement":"card","kind":"open_dialog","requiresAck":true})";
+    settings.kind = v1::AdapterActionKind::OpenDialog;
     caps.instanceActions.push_back(settings);
 
     v1::AdapterActionDescriptor probeCurrent;
@@ -167,7 +166,7 @@ v1::AdapterCapabilities capabilities()
     probeCurrent.label = "Probe current";
     probeCurrent.description = "Probe current input and refresh labels.";
     probeCurrent.hasForm = false;
-    probeCurrent.metaJson = R"({"placement":"form_field","kind":"command","requiresAck":true})";
+    probeCurrent.placement = v1::AdapterActionPlacement::Field;
     caps.instanceActions.push_back(probeCurrent);
 
     return caps;
