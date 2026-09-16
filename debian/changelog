@@ -1,3 +1,12 @@
+phi-adapter-onkyo (0.0~git202609161411.75b5c88-1) trixie; urgency=medium
+
+  * Log with levels instead of stderr: adapter-domain logging goes
+    through the SDK logger, no more raw stderr writes that core stamps
+    Warn.
+  * Build-Depends and Depends bumped to phi-adapter-sdk (>= 0.19.0).
+
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Wed, 16 Sep 2026 14:11:01 +0200
+
 phi-adapter-onkyo (0.0~git202609161212.fcd1b26-1) trixie; urgency=medium
 
   * onkyo: pace the poll by the answers, not by the socket
