@@ -1,3 +1,10 @@
+phi-adapter-onkyo (0.0~git202609161056.2ba7015-1) trixie; urgency=medium
+
+  * onkyo: read form values via sdk::formValuesFromJson instead of a
+    hand-rolled patch walk
+
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Wed, 16 Sep 2026 10:56:06 +0200
+
 phi-adapter-onkyo (0.0~git202609151747.1c6c08f-1) trixie; urgency=medium
 
   * Built against SDK 0.17.
