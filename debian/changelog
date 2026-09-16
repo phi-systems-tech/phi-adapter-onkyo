@@ -1,3 +1,9 @@
+phi-adapter-onkyo (0.0~git202609161212.fcd1b26-1) trixie; urgency=medium
+
+  * onkyo: pace the poll by the answers, not by the socket
+
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Wed, 16 Sep 2026 12:12:05 +0200
+
 phi-adapter-onkyo (0.0~git202609161158.47b93bb-1) trixie; urgency=medium
 
   * onkyo: back off from a receiver that is not answering via
