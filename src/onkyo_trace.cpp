@@ -1,14 +1,15 @@
 #include "onkyo_trace.h"
 
 #include <chrono>
-#include <iostream>
+#include <utility>
 
 namespace phicore::onkyo::ipc {
 
 namespace {
 
 constexpr bool kTraceEnabled = false;
-constexpr bool kTimingLogsEnabled = true;
+
+std::function<void(std::string_view)> g_sink;
 
 } // namespace
 
@@ -18,18 +19,22 @@ std::int64_t nowMs()
     return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
 }
 
+void setTraceSink(std::function<void(std::string_view)> sink)
+{
+    g_sink = std::move(sink);
+}
+
 void trace(std::string_view message)
 {
-    if (!kTraceEnabled)
+    if (!kTraceEnabled || !g_sink)
         return;
-    std::cerr << "[" << nowMs() << "] onkyo-ipc: " << message << '\n';
+    g_sink(message);
 }
 
 void timingLog(std::string_view message)
 {
-    if (!kTimingLogsEnabled)
-        return;
-    std::cerr << "[" << nowMs() << "] onkyo-ipc[timing]: " << message << '\n';
+    if (g_sink)
+        g_sink(message);
 }
 
 } // namespace phicore::onkyo::ipc

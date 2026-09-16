@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <chrono>
 #include <deque>
-#include <iostream>
 #include <optional>
 #include <string>
 #include <utility>
@@ -78,11 +77,16 @@ protected:
     {
         m_loop = phi::runtime::Loop::current();
         if (m_loop == nullptr) {
-            std::cerr << "onkyo instance started off a loop; no timers are possible\n";
+            log(sdk::LogLevel::Error, sdk::LogCategory::Lifecycle,
+                "started off a loop; no timers are possible");
             return false;
         }
         m_client.emplace(*m_loop);
         m_shots.emplace(*m_loop);
+        // The protocol and timing traces go where everything else goes now.
+        setTraceSink([this](std::string_view line) {
+            log(sdk::LogLevel::Trace, sdk::LogCategory::Performance, v1::Utf8String(line));
+        });
         m_lifecycle = Lifecycle::Running;
         m_state.forget();
         m_socket.forget();
@@ -157,9 +161,10 @@ protected:
         m_queue.pushPoll(nowMs(), true);
         pump();
 
-        std::cerr << "onkyo-ipc config.changed adapterId=" << request.adapterId
-                  << " externalId=" << request.adapter.externalId
-                  << " pluginType=" << request.adapter.pluginType << '\n';
+        log(sdk::LogLevel::Debug, sdk::LogCategory::Config,
+            "config.changed adapterId=%1 externalId=%2 pluginType=%3",
+            {static_cast<std::int64_t>(request.adapterId), request.adapter.externalId,
+             request.adapter.pluginType});
     }
 
     void onChannelInvoke(const sdk::ChannelInvokeRequest &request) override
@@ -777,7 +782,8 @@ private:
         const v1::ChannelList channels = buildChannels(m_inputs.choices());
         v1::Utf8String error;
         if (!sendDeviceUpdated(device, channels, &error)) {
-            std::cerr << "failed to send device snapshot: " << error << '\n';
+            log(sdk::LogLevel::Error, sdk::LogCategory::Internal,
+                "failed to send the device snapshot: %1", {error});
             return;
         }
         m_synced = true;
@@ -793,7 +799,8 @@ private:
         }
         v1::Utf8String error;
         if (!sendChannelUpdated(m_deviceId, buildInputChannel(m_inputs.choices()), &error))
-            std::cerr << "failed to send channelUpdated(input): " << error << '\n';
+            log(sdk::LogLevel::Error, sdk::LogCategory::Internal,
+                "failed to send channelUpdated(input): %1", {error});
     }
 
     /// The adapter's settings as they go into its meta. Which shapes a form
@@ -805,7 +812,8 @@ private:
             return;
         v1::Utf8String error;
         if (!sendAdapterMetaUpdated(sdk::formValuesFromJson(dump(patch)), &error))
-            std::cerr << "failed to send adapterMetaUpdated(" << context << "): " << error << '\n';
+            log(sdk::LogLevel::Error, sdk::LogCategory::Internal,
+                "failed to send adapterMetaUpdated(%1): %2", {v1::Utf8String(context), error});
     }
 
     void emitReport(const ChannelReport &report)
@@ -832,7 +840,8 @@ private:
             return;
         v1::Utf8String error;
         if (!sendChannelStateUpdated(m_deviceId, channelId, value, nowMs(), &error))
-            std::cerr << "failed to send channel state for " << channelId << ": " << error << '\n';
+            log(sdk::LogLevel::Error, sdk::LogCategory::Internal,
+                "failed to send the state of %1: %2", {v1::Utf8String(channelId), error});
     }
 
     void setConnected(bool connected)
@@ -843,7 +852,8 @@ private:
         armPollTimer();
         v1::Utf8String error;
         if (!sendConnectionStateChanged(m_connected, &error))
-            std::cerr << "failed to send connectionStateChanged: " << error << '\n';
+            log(sdk::LogLevel::Error, sdk::LogCategory::Internal,
+                "failed to send connectionStateChanged: %1", {error});
         emitChannelState(kChannelConnectivity,
                          static_cast<std::int64_t>(m_connected
                                                        ? v1::ConnectivityStatus::Connected
@@ -856,7 +866,8 @@ private:
         // A receiver that came back said nothing about it before; the only
         // sign was a connectivity value nobody was watching.
         if (verdict.say)
-            std::cerr << "Onkyo reachable again: " << firstHost() << " port=" << m_controlPort << '\n';
+            log(sdk::LogLevel::Info, sdk::LogCategory::Network, "reachable again: %1 port=%2",
+                {v1::Utf8String(firstHost()), static_cast<std::int64_t>(m_controlPort)});
         setConnected(true);
     }
 
@@ -864,7 +875,9 @@ private:
     {
         const sdk::Reachability::Verdict verdict = m_socket.missed(error, nowMs());
         if (verdict.say)
-            std::cerr << "Onkyo connect failed: " << error << " port=" << m_controlPort << '\n';
+            log(verdict.changed ? sdk::LogLevel::Error : sdk::LogLevel::Warn, sdk::LogCategory::Network,
+                "cannot be reached: %1 (port %2)",
+                {v1::Utf8String(error), static_cast<std::int64_t>(m_controlPort)});
         if (!verdict.changed)
             return;
         setConnected(false);
@@ -882,7 +895,8 @@ private:
             const sdk::Reachability::Verdict verdict = m_answers.answered(now);
             m_nextPollMs = verdict.waitMs;
             if (verdict.say)
-                std::cerr << "Onkyo answering again: " << firstHost() << '\n';
+                log(sdk::LogLevel::Info, sdk::LogCategory::Device, "answering again: %1",
+                    {v1::Utf8String(firstHost())});
             return;
         }
         const std::string reason = result.connected
@@ -893,8 +907,8 @@ private:
         // A receiver that cannot be reached at all is the socket's story, and
         // it tells it above.
         if (verdict.say && result.connected)
-            std::cerr << "Onkyo not answering: " << reason << ", asking every "
-                      << (verdict.waitMs / 1000) << "s\n";
+            log(sdk::LogLevel::Warn, sdk::LogCategory::Device, "not answering: %1, asking every %2s",
+                {v1::Utf8String(reason), verdict.waitMs / 1000});
     }
 
     // --- answering --------------------------------------------------------
@@ -915,7 +929,8 @@ private:
     {
         v1::Utf8String sendError;
         if (!sendResult(responseFor(cmdId, status, error), &sendError))
-            std::cerr << "failed to send " << context << " result: " << sendError << '\n';
+            log(sdk::LogLevel::Error, sdk::LogCategory::Internal, "failed to send the %1 result: %2",
+                {v1::Utf8String(context), sendError});
     }
 
     void answerAction(v1::CmdId cmdId, v1::CmdStatus status, const std::string &error)
@@ -928,7 +943,8 @@ private:
         response.resultType = v1::ActionResultType::None;
         v1::Utf8String sendError;
         if (!sendResult(response, &sendError))
-            std::cerr << "failed to send adapter.action.invoke result: " << sendError << '\n';
+            log(sdk::LogLevel::Error, sdk::LogCategory::Internal,
+                "failed to send the adapter.action.invoke result: %1", {sendError});
     }
 
     /// Answers the running channel invoke and moves on.
@@ -942,7 +958,8 @@ private:
     {
         v1::Utf8String sendError;
         if (!sendResult(response, &sendError))
-            std::cerr << "failed to send channel.invoke result: " << sendError << '\n';
+            log(sdk::LogLevel::Error, sdk::LogCategory::Internal,
+                "failed to send the channel.invoke result: %1", {sendError});
         finishOperation();
     }
 
@@ -961,7 +978,8 @@ private:
     {
         v1::Utf8String sendError;
         if (!sendResult(response, &sendError))
-            std::cerr << "failed to send adapter.action.invoke result: " << sendError << '\n';
+            log(sdk::LogLevel::Error, sdk::LogCategory::Internal,
+                "failed to send the adapter.action.invoke result: %1", {sendError});
         finishOperation();
     }
 

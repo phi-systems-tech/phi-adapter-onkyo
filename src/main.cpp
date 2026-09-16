@@ -91,7 +91,10 @@ protected:
 
     std::unique_ptr<sdk::AdapterInstance> createInstance(const sdk::ExternalId &externalId) override
     {
-        std::cerr << "create onkyo instance externalId=" << externalId << '\n';
+        // The host owns "an instance was created"; this is the adapter noting
+        // which one it is about to build.
+        log(sdk::LogLevel::Debug, sdk::LogCategory::Lifecycle, "building the instance for %1",
+            {externalId});
         return makeInstance(schemaInputLabels());
     }
 
@@ -100,7 +103,8 @@ protected:
         v1::ActionResponse response = handleFactoryActionInvoke(request);
         v1::Utf8String error;
         if (!sendResult(response, &error))
-            std::cerr << "failed to send factory.action.invoke result: " << error << '\n';
+            log(sdk::LogLevel::Error, sdk::LogCategory::Internal,
+                "failed to send the factory.action.invoke result: %1", {error});
     }
 
 private:
@@ -164,6 +168,7 @@ int main(int argc, char **argv)
         ? argv[1]
         : (envSocketPath ? envSocketPath : v1::Utf8String("/tmp/phi-adapter-onkyo-ipc.sock"));
 
+    // Before the dispatcher exists there is nowhere else to say this.
     std::cerr << "starting phi_adapter_onkyo_ipc for pluginType=" << kPluginType
               << " socket=" << socketPath << '\n';
 

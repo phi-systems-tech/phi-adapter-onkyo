@@ -68,7 +68,7 @@ enough to test without a receiver:
 | `onkyo_schema` | adapter identity and the config schema phi-ui renders |
 | `onkyo_instance` | the lifecycle that ties them together |
 | `onkyo_probe` | the factory's blocking reachability check |
-| `onkyo_json`, `onkyo_trace` | JSON accessors and the stderr diagnostic channel |
+| `onkyo_json`, `onkyo_trace` | JSON accessors and the protocol/timing traces, which go to the instance log at `Trace` |
 
 ### Configuration
 
