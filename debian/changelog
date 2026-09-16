@@ -1,3 +1,11 @@
+phi-adapter-onkyo (0.0~git202609161503.24112f8-1) trixie; urgency=medium
+
+  * Say nothing the host already said: no stderr banner or
+    create-instance debug line, config.changed now logs the receiver
+    host and port instead of echoing the request.
+
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Wed, 16 Sep 2026 15:03:41 +0200
+
 phi-adapter-onkyo (0.0~git202609161411.75b5c88-1) trixie; urgency=medium
 
   * Log with levels instead of stderr: adapter-domain logging goes
