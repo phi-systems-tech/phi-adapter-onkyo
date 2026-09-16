@@ -161,10 +161,8 @@ protected:
         m_queue.pushPoll(nowMs(), true);
         pump();
 
-        log(sdk::LogLevel::Debug, sdk::LogCategory::Config,
-            "config.changed adapterId=%1 externalId=%2 pluginType=%3",
-            {static_cast<std::int64_t>(request.adapterId), request.adapter.externalId,
-             request.adapter.pluginType});
+        log(sdk::LogLevel::Debug, sdk::LogCategory::Config, "receiver at %1, port %2",
+            {v1::Utf8String(firstHost()), static_cast<std::int64_t>(m_controlPort)});
     }
 
     void onChannelInvoke(const sdk::ChannelInvokeRequest &request) override

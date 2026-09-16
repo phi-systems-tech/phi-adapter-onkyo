@@ -4,7 +4,6 @@
 
 #include <chrono>
 #include <cstdlib>
-#include <iostream>
 #include <map>
 #include <memory>
 #include <string>
@@ -93,8 +92,6 @@ protected:
     {
         // The host owns "an instance was created"; this is the adapter noting
         // which one it is about to build.
-        log(sdk::LogLevel::Debug, sdk::LogCategory::Lifecycle, "building the instance for %1",
-            {externalId});
         return makeInstance(schemaInputLabels());
     }
 
@@ -168,9 +165,6 @@ int main(int argc, char **argv)
         ? argv[1]
         : (envSocketPath ? envSocketPath : v1::Utf8String("/tmp/phi-adapter-onkyo-ipc.sock"));
 
-    // Before the dispatcher exists there is nowhere else to say this.
-    std::cerr << "starting phi_adapter_onkyo_ipc for pluginType=" << kPluginType
-              << " socket=" << socketPath << '\n';
 
     OnkyoIpcFactory factory;
     sdk::SidecarHost host(socketPath, factory);
