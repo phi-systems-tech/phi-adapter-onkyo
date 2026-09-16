@@ -9,6 +9,7 @@
 #include <utility>
 #include <vector>
 
+#include "phi/adapter/sdk/reachability.h"
 #include "phi/adapter/sdk/schema_json.h"
 
 #include "phi/runtime/loop.h"
@@ -48,7 +49,6 @@ constexpr auto kRefreshAfterWrite = 1000ms;
 
 /// Three failed polls before connectivity is called lost - a receiver that
 /// misses one answer is not a receiver that has gone away.
-constexpr int kConnectFailuresBeforeDisconnect = 3;
 
 const std::vector<std::string> &pollCommands()
 {
@@ -85,7 +85,7 @@ protected:
         m_shots.emplace(*m_loop);
         m_lifecycle = Lifecycle::Running;
         m_state.forget();
-        m_consecutiveConnectFailures = 0;
+        m_receiver.forget();
         setConnected(false);
         // Nothing is polled yet: start() runs before the first config.changed,
         // so there is no host to poll. The first poll is armed there, which is
@@ -116,7 +116,7 @@ protected:
         m_running.reset();
         answerEverythingPending("Instance disconnected");
         m_state.forget();
-        m_consecutiveConnectFailures = 0;
+        m_receiver.forget();
         setConnected(false);
     }
 
@@ -139,7 +139,7 @@ protected:
         m_lifecycle = Lifecycle::Running;
         m_deviceId = resolveDeviceId(m_info, m_meta, firstHost());
         m_synced = false;
-        m_consecutiveConnectFailures = 0;
+        m_receiver.forget();
         m_state.forget();
         if (m_client)
             m_client->cancel();
@@ -234,8 +234,24 @@ private:
         m_controlPort = resolvedControlPort(configured > 0 ? configured : discovered);
         m_pollIntervalMs = std::clamp(jsonInt(m_meta, "pollIntervalMs", 5000), 500, 300000);
         m_retryIntervalMs = std::clamp(jsonInt(m_meta, "retryIntervalMs", 10000), 1000, 300000);
+        m_receiver = sdk::Reachability(receiverPolicy());
+        m_nextPollMs = m_pollIntervalMs;
         m_state.setVolumeMaxRaw(jsonInt(m_meta, "volumeMaxRaw", 160));
         m_inputs.applyMeta(m_meta);
+    }
+
+    /// Three missed polls before the receiver counts as gone, and then ever
+    /// longer between attempts: one that stands on standby does not answer any
+    /// sooner for being asked every five seconds, and this adapter asked it
+    /// twelve times a minute for as long as it stood there.
+    [[nodiscard]] sdk::Reachability::Policy receiverPolicy() const
+    {
+        const auto retry = static_cast<std::int64_t>(m_retryIntervalMs);
+        sdk::Reachability::Policy policy;
+        policy.intervalMs = m_pollIntervalMs;
+        policy.strikes = 3;
+        policy.retryDelaysMs = {retry, 2 * retry, 3 * retry, 6 * retry};
+        return policy;
     }
 
     void normalizeActiveCodesInMeta()
@@ -290,7 +306,7 @@ private:
     {
         if (!m_loop || m_lifecycle != Lifecycle::Running)
             return;
-        const int interval = m_connected ? m_pollIntervalMs : m_retryIntervalMs;
+        const int interval = static_cast<int>(m_nextPollMs > 0 ? m_nextPollMs : m_pollIntervalMs);
         if (m_pollTimer && interval == m_pollTimerInterval)
             return;
         m_pollTimerInterval = interval;
@@ -818,29 +834,25 @@ private:
 
     void markConnectSuccess()
     {
-        m_consecutiveConnectFailures = 0;
+        const sdk::Reachability::Verdict verdict = m_receiver.answered(nowMs());
+        m_nextPollMs = verdict.waitMs;
+        // A receiver that came back said nothing about it before; the only
+        // sign was a connectivity value nobody was watching.
+        if (verdict.say)
+            std::cerr << "Onkyo answering again: " << firstHost() << " port=" << m_controlPort << '\n';
         setConnected(true);
     }
 
     void markConnectFailure(const std::string &error)
     {
-        logConnectFailure(error);
-        if (m_consecutiveConnectFailures < kConnectFailuresBeforeDisconnect)
-            ++m_consecutiveConnectFailures;
-        if (m_consecutiveConnectFailures < kConnectFailuresBeforeDisconnect)
+        const sdk::Reachability::Verdict verdict = m_receiver.missed(error, nowMs());
+        m_nextPollMs = verdict.waitMs;
+        if (verdict.say)
+            std::cerr << "Onkyo connect failed: " << error << " port=" << m_controlPort << '\n';
+        if (!verdict.changed)
             return;
         setConnected(false);
         m_state.forget();
-    }
-
-    void logConnectFailure(const std::string &error)
-    {
-        const std::int64_t now = nowMs();
-        if (error == m_lastConnectError && (now - m_lastConnectLogMs) < m_retryIntervalMs)
-            return;
-        m_lastConnectError = error;
-        m_lastConnectLogMs = now;
-        std::cerr << "Onkyo connect failed: " << error << " port=" << m_controlPort << '\n';
     }
 
     // --- answering --------------------------------------------------------
@@ -1004,9 +1016,9 @@ private:
     Lifecycle m_lifecycle = Lifecycle::Idle;
     bool m_connected = false;
     bool m_synced = false;
-    int m_consecutiveConnectFailures = 0;
-    std::string m_lastConnectError;
-    std::int64_t m_lastConnectLogMs = 0;
+    sdk::Reachability m_receiver;
+    /// What the gate said to wait before the next poll.
+    std::int64_t m_nextPollMs = 0;
 };
 
 } // namespace

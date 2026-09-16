@@ -100,9 +100,17 @@ one at a time.
 
 - `Running + Disconnected`
   - `connected=false`
-  - Poll timer uses `retryIntervalMs`.
   - Three consecutive polls that could not open a connection are what turns
     connectivity off; one missed answer is not a receiver that has gone away.
+  - The poll then backs off: `retryIntervalMs`, twice, three times, six times
+    it, and there it stays. A receiver on standby does not answer any sooner
+    for being asked every five seconds, and asking filled the journal with the
+    same sentence twelve times a minute. The counting, the growing wait and
+    the rule about when a line is worth writing are `sdk::Reachability`
+    (phi-adapter-sdk README, "A Device That Stops Answering"), the same policy
+    every adapter uses.
+  - One line when it is gone, one when it answers again. Coming back used to
+    be silent.
 
 **What connectivity means here:** the TCP connection, and only that. A receiver
 in standby accepts the socket and hangs up without answering a query - it is
@@ -114,6 +122,7 @@ reported as disconnected.
 - `Running + Connected`
   - `connected=true`
   - Poll timer uses `pollIntervalMs`.
+  - Any answer resets the strikes and the wait.
   - One poll opens a connection and asks `PWRQSTN`, `MVLQSTN`, `AMTQSTN`,
     `SLIQSTN`, each awaited before the next goes out.
   - A query is answered when *its own* answer arrives, not when any frame does:
