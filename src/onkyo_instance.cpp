@@ -85,7 +85,8 @@ protected:
         m_shots.emplace(*m_loop);
         m_lifecycle = Lifecycle::Running;
         m_state.forget();
-        m_receiver.forget();
+        m_socket.forget();
+        m_answers.forget();
         setConnected(false);
         // Nothing is polled yet: start() runs before the first config.changed,
         // so there is no host to poll. The first poll is armed there, which is
@@ -116,7 +117,8 @@ protected:
         m_running.reset();
         answerEverythingPending("Instance disconnected");
         m_state.forget();
-        m_receiver.forget();
+        m_socket.forget();
+        m_answers.forget();
         setConnected(false);
     }
 
@@ -139,7 +141,8 @@ protected:
         m_lifecycle = Lifecycle::Running;
         m_deviceId = resolveDeviceId(m_info, m_meta, firstHost());
         m_synced = false;
-        m_receiver.forget();
+        m_socket.forget();
+        m_answers.forget();
         m_state.forget();
         if (m_client)
             m_client->cancel();
@@ -234,17 +237,31 @@ private:
         m_controlPort = resolvedControlPort(configured > 0 ? configured : discovered);
         m_pollIntervalMs = std::clamp(jsonInt(m_meta, "pollIntervalMs", 5000), 500, 300000);
         m_retryIntervalMs = std::clamp(jsonInt(m_meta, "retryIntervalMs", 10000), 1000, 300000);
-        m_receiver = sdk::Reachability(receiverPolicy());
+        m_socket = sdk::Reachability(connectPolicy());
+        m_answers = sdk::Reachability(answerPolicy());
         m_nextPollMs = m_pollIntervalMs;
         m_state.setVolumeMaxRaw(jsonInt(m_meta, "volumeMaxRaw", 160));
         m_inputs.applyMeta(m_meta);
     }
 
-    /// Three missed polls before the receiver counts as gone, and then ever
-    /// longer between attempts: one that stands on standby does not answer any
-    /// sooner for being asked every five seconds, and this adapter asked it
-    /// twelve times a minute for as long as it stood there.
-    [[nodiscard]] sdk::Reachability::Policy receiverPolicy() const
+    /// The socket: three connections that could not be made and the receiver
+    /// counts as gone. This is what connectivity means here, and a receiver in
+    /// standby is not gone - it accepts the socket, which is how the UI can
+    /// offer to switch it on.
+    [[nodiscard]] static sdk::Reachability::Policy connectPolicy()
+    {
+        sdk::Reachability::Policy policy;
+        policy.strikes = 3;
+        policy.retryDelaysMs.clear();
+        return policy;
+    }
+
+    /// The answers: what the poll runs on. A receiver in standby takes the
+    /// connection and answers nothing, and asking it twelve times a minute
+    /// makes it no more talkative - it only fills the journal. Three polls
+    /// that brought nothing back and the wait grows to six times the retry
+    /// interval.
+    [[nodiscard]] sdk::Reachability::Policy answerPolicy() const
     {
         const auto retry = static_cast<std::int64_t>(m_retryIntervalMs);
         sdk::Reachability::Policy policy;
@@ -417,6 +434,7 @@ private:
             markConnectSuccess();
         else
             markConnectFailure(result.error);
+        pace(result);
         for (const ChannelReport &report : m_state.apply(result.statuses))
             emitReport(report);
     }
@@ -834,25 +852,49 @@ private:
 
     void markConnectSuccess()
     {
-        const sdk::Reachability::Verdict verdict = m_receiver.answered(nowMs());
-        m_nextPollMs = verdict.waitMs;
+        const sdk::Reachability::Verdict verdict = m_socket.answered(nowMs());
         // A receiver that came back said nothing about it before; the only
         // sign was a connectivity value nobody was watching.
         if (verdict.say)
-            std::cerr << "Onkyo answering again: " << firstHost() << " port=" << m_controlPort << '\n';
+            std::cerr << "Onkyo reachable again: " << firstHost() << " port=" << m_controlPort << '\n';
         setConnected(true);
     }
 
     void markConnectFailure(const std::string &error)
     {
-        const sdk::Reachability::Verdict verdict = m_receiver.missed(error, nowMs());
-        m_nextPollMs = verdict.waitMs;
+        const sdk::Reachability::Verdict verdict = m_socket.missed(error, nowMs());
         if (verdict.say)
             std::cerr << "Onkyo connect failed: " << error << " port=" << m_controlPort << '\n';
         if (!verdict.changed)
             return;
         setConnected(false);
         m_state.forget();
+    }
+
+    /// How soon to ask again, which follows the answers rather than the
+    /// socket: a receiver on standby accepts every connection and answers
+    /// none of the four queries, and that is the state this used to poll
+    /// through at full speed.
+    void pace(const IscpResult &result)
+    {
+        const std::int64_t now = nowMs();
+        if (result.answered > 0) {
+            const sdk::Reachability::Verdict verdict = m_answers.answered(now);
+            m_nextPollMs = verdict.waitMs;
+            if (verdict.say)
+                std::cerr << "Onkyo answering again: " << firstHost() << '\n';
+            return;
+        }
+        const std::string reason = result.connected
+            ? "the receiver answered none of the queries (standby?)"
+            : (result.error.empty() ? "no connection" : result.error);
+        const sdk::Reachability::Verdict verdict = m_answers.missed(reason, now);
+        m_nextPollMs = verdict.waitMs;
+        // A receiver that cannot be reached at all is the socket's story, and
+        // it tells it above.
+        if (verdict.say && result.connected)
+            std::cerr << "Onkyo not answering: " << reason << ", asking every "
+                      << (verdict.waitMs / 1000) << "s\n";
     }
 
     // --- answering --------------------------------------------------------
@@ -1016,7 +1058,8 @@ private:
     Lifecycle m_lifecycle = Lifecycle::Idle;
     bool m_connected = false;
     bool m_synced = false;
-    sdk::Reachability m_receiver;
+    sdk::Reachability m_socket;
+    sdk::Reachability m_answers;
     /// What the gate said to wait before the next poll.
     std::int64_t m_nextPollMs = 0;
 };
