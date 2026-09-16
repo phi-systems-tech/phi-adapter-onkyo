@@ -1,3 +1,10 @@
+phi-adapter-onkyo (0.0~git202609161158.47b93bb-1) trixie; urgency=medium
+
+  * onkyo: back off from a receiver that is not answering via
+    sdk::Reachability
+
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Wed, 16 Sep 2026 11:58:30 +0200
+
 phi-adapter-onkyo (0.0~git202609161056.2ba7015-1) trixie; urgency=medium
 
   * onkyo: read form values via sdk::formValuesFromJson instead of a
