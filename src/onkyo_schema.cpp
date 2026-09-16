@@ -34,8 +34,7 @@ constexpr const char kOnkyoIconSvg[] =
  * is known about it. That is deliberate - a user with an input this adapter
  * has never heard of can still select it and name it - but it does mean the
  * bootstrap schema is a few hundred fields wide for a receiver with six
- * inputs. `configSchemaSize()` exists so the cost is a number rather than an
- * impression.
+ * inputs.
  */
 v1::AdapterConfigOptionList schemaInputChoices(const std::map<std::string, std::string> &labels)
 {

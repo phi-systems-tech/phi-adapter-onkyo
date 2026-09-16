@@ -9,6 +9,8 @@
 #include <utility>
 #include <vector>
 
+#include "phi/adapter/sdk/schema_json.h"
+
 #include "phi/runtime/loop.h"
 #include "phi/runtime/oneshots.h"
 #include "phi/runtime/str.h"
@@ -760,36 +762,15 @@ private:
             std::cerr << "failed to send channelUpdated(input): " << error << '\n';
     }
 
-    /// The adapter's settings as they go into its meta: strings, numbers,
-    /// switches and the list of active codes.
+    /// The adapter's settings as they go into its meta. Which shapes a form
+    /// value can take - a scalar, a list, a value per choice - is the SDK's
+    /// to know, and it reads them out of the patch.
     void sendMetaPatch(const Json &patch, const char *context)
     {
         if (patch.empty())
             return;
-        v1::AdapterFormValues values;
-        for (const auto &entry : patch.items()) {
-            const Json &value = entry.value();
-            if (value.is_array()) {
-                v1::ScalarList list;
-                for (const Json &item : value) {
-                    if (item.is_string())
-                        list.emplace_back(item.get<std::string>());
-                }
-                values.push_back({entry.key(), std::move(list)});
-            } else if (value.is_string()) {
-                values.push_back({entry.key(), v1::ScalarValue(value.get<std::string>())});
-            } else if (value.is_boolean()) {
-                values.push_back({entry.key(), v1::ScalarValue(value.get<bool>())});
-            } else if (value.is_number_integer()) {
-                values.push_back({entry.key(), v1::ScalarValue(value.get<std::int64_t>())});
-            } else if (value.is_number()) {
-                values.push_back({entry.key(), v1::ScalarValue(value.get<double>())});
-            } else if (value.is_null()) {
-                values.push_back({entry.key(), v1::ScalarValue()});
-            }
-        }
         v1::Utf8String error;
-        if (!sendAdapterMetaUpdated(values, &error))
+        if (!sendAdapterMetaUpdated(sdk::formValuesFromJson(dump(patch)), &error))
             std::cerr << "failed to send adapterMetaUpdated(" << context << "): " << error << '\n';
     }
 
