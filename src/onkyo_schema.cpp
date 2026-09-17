@@ -142,7 +142,7 @@ v1::AdapterCapabilities capabilities()
     v1::AdapterCapabilities caps;
     caps.required = v1::AdapterRequirement::Host | v1::AdapterRequirement::Port;
     caps.optional = v1::AdapterRequirement::UsesRetryInterval;
-    caps.flags = v1::AdapterFlag::None;
+    caps.flags = v1::AdapterCapability::None;
 
     v1::AdapterActionDescriptor probe;
     probe.id = "probe";
