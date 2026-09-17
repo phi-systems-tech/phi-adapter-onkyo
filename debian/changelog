@@ -1,3 +1,11 @@
+phi-adapter-onkyo (0.0~git202609172148.a9d5f2a-1) trixie; urgency=medium
+
+  * AdapterFlag is split into AdapterCapability (what a plugin declares
+    about itself) and AdapterOption (what a household answers for one
+    instance: UseTls, EnableLogs); bit values unchanged
+
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Thu, 17 Sep 2026 21:48:38 +0200
+
 phi-adapter-onkyo (0.0~git202609161503.24112f8-1) trixie; urgency=medium
 
   * Say nothing the host already said: no stderr banner or
