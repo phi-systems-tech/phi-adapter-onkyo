@@ -36,6 +36,15 @@ Provides local network command/control integration for Onkyo/Pioneer receivers.
 - Descriptor-driven config schema (`configSchema`) sent during bootstrap
 - Factory action `probe` (`Test connection`) handled via IPC
 - Instance actions `settings` and `probeCurrentInput`
+- Media-player transport for the receiver's NET/USB player: play, pause, stop,
+  next track and previous track
+
+Transport controls are eISCP button commands. They are accepted once the
+command was written to the receiver; the protocol does not expose a matching
+playback-state acknowledgement here. URI playback, queueing and position-based
+seeking are not advertised because eISCP provides no portable operation for
+them. Availability of NET/USB transport can vary by receiver model and active
+input.
 
 ### Runtime Requirements
 
@@ -69,6 +78,7 @@ enough to test without a receiver:
 | `onkyo_instance` | the lifecycle that ties them together |
 | `onkyo_probe` | the factory's blocking reachability check |
 | `onkyo_json`, `onkyo_trace` | JSON accessors and the protocol/timing traces, which go to the instance log at `Trace` |
+| `onkyo_media` | generic media-player actions mapped to NET/USB eISCP transport commands |
 
 ### Configuration
 

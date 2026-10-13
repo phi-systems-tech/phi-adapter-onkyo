@@ -56,6 +56,7 @@ if(PHI_ADAPTER_ONKYO_BUILD_IPC)
         src/onkyo_instance.cpp
         src/onkyo_iscp_client.cpp
         src/onkyo_json.cpp
+        src/onkyo_media.cpp
         src/onkyo_probe.cpp
         src/onkyo_queue.cpp
         src/onkyo_schema.cpp

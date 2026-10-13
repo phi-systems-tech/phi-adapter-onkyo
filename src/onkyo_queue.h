@@ -21,12 +21,14 @@ struct Operation {
     enum class Kind {
         Poll,
         ChannelInvoke,
+        MediaPlayerInvoke,
         ProbeCurrentInput,
     };
 
     Kind kind = Kind::Poll;
     std::int64_t enqueuedMs = 0;
     phicore::adapter::sdk::ChannelInvokeRequest channelRequest;
+    phicore::adapter::sdk::MediaPlayerInvokeRequest mediaPlayerRequest;
     phicore::adapter::sdk::AdapterActionInvokeRequest actionRequest;
 };
 
@@ -42,6 +44,10 @@ public:
      */
     std::vector<phicore::adapter::v1::CmdId> pushChannelInvoke(
         const phicore::adapter::sdk::ChannelInvokeRequest &request, std::int64_t nowMs);
+
+    /// Player button presses are serialized and never coalesced.
+    void pushMediaPlayerInvoke(
+        const phicore::adapter::sdk::MediaPlayerInvokeRequest &request, std::int64_t nowMs);
 
     /// To the front: somebody is watching a form field for this.
     void pushProbe(const phicore::adapter::sdk::AdapterActionInvokeRequest &request,

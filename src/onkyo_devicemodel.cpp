@@ -94,6 +94,11 @@ v1::Device buildDevice(const std::string &deviceId,
     v1::Device device;
     device.externalId = deviceId;
     device.deviceClass = v1::DeviceClass::MediaPlayer;
+    device.mediaPlayerFeatures = v1::MediaPlayerFeature::Play
+        | v1::MediaPlayerFeature::Pause
+        | v1::MediaPlayerFeature::Stop
+        | v1::MediaPlayerFeature::Next
+        | v1::MediaPlayerFeature::Previous;
 
     const std::string adapterName = str::trimmed(info.name);
     const std::string metaName = str::trimmed(jsonString(meta, "deviceName"));

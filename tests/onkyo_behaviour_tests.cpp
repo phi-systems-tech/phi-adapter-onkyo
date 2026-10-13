@@ -6,7 +6,9 @@
 #include <phi/adapter/testing/check.h>
 
 #include "onkyo_inputs.h"
+#include "onkyo_devicemodel.h"
 #include "onkyo_json.h"
+#include "onkyo_media.h"
 #include "onkyo_queue.h"
 #include "onkyo_state.h"
 
@@ -14,6 +16,7 @@
 
 using namespace phicore::onkyo::ipc;
 namespace sdk = phicore::adapter::sdk;
+namespace v1 = phicore::adapter::v1;
 
 namespace {
 
@@ -27,6 +30,15 @@ sdk::ChannelInvokeRequest invoke(std::uint64_t cmdId, const char *channel)
     request.cmdId = cmdId;
     request.deviceExternalId = "dev";
     request.channelExternalId = channel;
+    return request;
+}
+
+sdk::MediaPlayerInvokeRequest mediaInvoke(std::uint64_t cmdId, v1::MediaPlayerAction action)
+{
+    sdk::MediaPlayerInvokeRequest request;
+    request.cmdId = cmdId;
+    request.deviceExternalId = "dev";
+    request.action = action;
     return request;
 }
 
@@ -183,6 +195,46 @@ void testAProbeGoesToTheFrontAndNothingIsLostOnADrain()
     PHI_CHECK(!queue.hasPriorityWork());
 }
 
+void testMediaPlayerCommandsMatchTheReceiverProtocol()
+{
+    PHI_CHECK(mediaPlayerCommand(v1::MediaPlayerAction::Play) == "NTCPLAY");
+    PHI_CHECK(mediaPlayerCommand(v1::MediaPlayerAction::Pause) == "NTCPAUSE");
+    PHI_CHECK(mediaPlayerCommand(v1::MediaPlayerAction::Stop) == "NTCSTOP");
+    PHI_CHECK(mediaPlayerCommand(v1::MediaPlayerAction::Next) == "NTCTRUP");
+    PHI_CHECK(mediaPlayerCommand(v1::MediaPlayerAction::Previous) == "NTCTRDN");
+    PHI_CHECK(!mediaPlayerCommand(v1::MediaPlayerAction::SeekTo).has_value());
+    PHI_CHECK(!mediaPlayerCommand(v1::MediaPlayerAction::SeekBy).has_value());
+    PHI_CHECK(!mediaPlayerCommand(v1::MediaPlayerAction::PlayMedia).has_value());
+}
+
+void testMediaPlayerCommandsStayInOrder()
+{
+    OperationQueue queue;
+    queue.pushPoll(1, false);
+    queue.pushMediaPlayerInvoke(mediaInvoke(10, v1::MediaPlayerAction::Play), 2);
+    queue.pushMediaPlayerInvoke(mediaInvoke(11, v1::MediaPlayerAction::Next), 3);
+
+    PHI_CHECK(queue.size() == 2);
+    const auto first = queue.take();
+    const auto second = queue.take();
+    PHI_CHECK(first.has_value() && first->kind == Operation::Kind::MediaPlayerInvoke
+              && first->mediaPlayerRequest.cmdId == 10);
+    PHI_CHECK(second.has_value() && second->kind == Operation::Kind::MediaPlayerInvoke
+              && second->mediaPlayerRequest.cmdId == 11);
+}
+
+void testDeviceAdvertisesOnlyImplementedMediaControls()
+{
+    v1::Adapter adapter;
+    const v1::Device device = buildDevice("dev", adapter, parseObject("{}"), "receiver");
+    const auto expected = v1::MediaPlayerFeature::Play
+        | v1::MediaPlayerFeature::Pause
+        | v1::MediaPlayerFeature::Stop
+        | v1::MediaPlayerFeature::Next
+        | v1::MediaPlayerFeature::Previous;
+    PHI_CHECK(device.mediaPlayerFeatures == expected);
+}
+
 } // namespace
 
 int main()
@@ -194,5 +246,8 @@ int main()
     testAWriteDoesNotWaitBehindAStalePoll();
     testASliderSendsItsLastPositionAndAnswersTheRest();
     testAProbeGoesToTheFrontAndNothingIsLostOnADrain();
+    testMediaPlayerCommandsMatchTheReceiverProtocol();
+    testMediaPlayerCommandsStayInOrder();
+    testDeviceAdvertisesOnlyImplementedMediaControls();
     return phi::testing::report("onkyo_behaviour_tests");
 }

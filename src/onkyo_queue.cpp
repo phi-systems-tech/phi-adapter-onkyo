@@ -53,6 +53,21 @@ std::vector<v1::CmdId> OperationQueue::pushChannelInvoke(
     return superseded;
 }
 
+void OperationQueue::pushMediaPlayerInvoke(const sdk::MediaPlayerInvokeRequest &request,
+                                           std::int64_t nowMs)
+{
+    // Like a channel write, a transport command should not wait for a poll
+    // whose result cannot affect it. Unlike a slider, every button press is
+    // meaningful and stays in FIFO order.
+    dropQueuedPolls();
+
+    Operation op;
+    op.kind = Operation::Kind::MediaPlayerInvoke;
+    op.enqueuedMs = nowMs;
+    op.mediaPlayerRequest = request;
+    m_queue.push_back(std::move(op));
+}
+
 void OperationQueue::pushProbe(const sdk::AdapterActionInvokeRequest &request, std::int64_t nowMs)
 {
     Operation op;

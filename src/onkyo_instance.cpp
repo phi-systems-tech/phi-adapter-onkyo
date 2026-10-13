@@ -21,6 +21,7 @@
 #include "onkyo_inputs.h"
 #include "onkyo_iscp_client.h"
 #include "onkyo_json.h"
+#include "onkyo_media.h"
 #include "onkyo_queue.h"
 #include "onkyo_schema.h"
 #include "onkyo_selector.h"
@@ -118,7 +119,6 @@ protected:
         m_pollTimer.reset();
         if (m_client)
             m_client->cancel();
-        m_running.reset();
         answerEverythingPending("Instance disconnected");
         m_state.forget();
         m_socket.forget();
@@ -150,7 +150,6 @@ protected:
         m_state.forget();
         if (m_client)
             m_client->cancel();
-        m_running.reset();
         answerEverythingPending("Config changed");
 
         if (endpointChanged || !m_connected)
@@ -181,6 +180,30 @@ protected:
             // cannot back up.
             answerCommand(superseded, v1::CmdStatus::Success, {}, "channel.invoke.superseded");
         }
+        pump();
+    }
+
+    void onMediaPlayerInvoke(const sdk::MediaPlayerInvokeRequest &request) override
+    {
+        timingLog(str::arg("cmd.recv type=mediaPlayer.invoke cmdId=%1 action=%2",
+                           request.cmdId, static_cast<int>(request.action)));
+        if (m_lifecycle != Lifecycle::Running) {
+            answerCommand(request.cmdId, v1::CmdStatus::TemporarilyOffline,
+                          "Instance is not running", "mediaPlayer.invoke");
+            return;
+        }
+        if (request.deviceExternalId != m_deviceId) {
+            answerCommand(request.cmdId, v1::CmdStatus::NotSupported,
+                          "Unknown device", "mediaPlayer.invoke");
+            return;
+        }
+        if (!mediaPlayerCommand(request.action).has_value()) {
+            answerCommand(request.cmdId, v1::CmdStatus::NotSupported,
+                          "Media player action not supported", "mediaPlayer.invoke");
+            return;
+        }
+
+        m_queue.pushMediaPlayerInvoke(request, nowMs());
         pump();
     }
 
@@ -376,6 +399,12 @@ private:
                                m_running->channelRequest.cmdId,
                                m_running->channelRequest.channelExternalId, waited));
             beginChannelInvoke();
+            break;
+        case Operation::Kind::MediaPlayerInvoke:
+            timingLog(str::arg("cmd.start type=mediaPlayer.invoke cmdId=%1 action=%2 waitMs=%3",
+                               m_running->mediaPlayerRequest.cmdId,
+                               static_cast<int>(m_running->mediaPlayerRequest.action), waited));
+            beginMediaPlayerInvoke();
             break;
         case Operation::Kind::ProbeCurrentInput:
             timingLog(str::arg("cmd.start type=adapter.action.invoke cmdId=%1 waitMs=%2",
@@ -639,6 +668,43 @@ private:
             m_queue.pushPoll(nowMs(), true);
             pump();
         });
+    }
+
+    // --- media player transport -----------------------------------------
+
+    void beginMediaPlayerInvoke()
+    {
+        const sdk::MediaPlayerInvokeRequest request = m_running->mediaPlayerRequest;
+        const std::optional<std::string_view> command = mediaPlayerCommand(request.action);
+        if (!command.has_value()) {
+            completeCommand(v1::CmdStatus::NotSupported, "Media player action not supported");
+            return;
+        }
+        if (!addressable()) {
+            completeCommand(v1::CmdStatus::TemporarilyOffline, "Receiver unavailable");
+            return;
+        }
+
+        m_client->start(requestFor({std::string(*command)}, false),
+                        [this, cmdId = request.cmdId](IscpResult result) {
+                            if (result.connected)
+                                markConnectSuccess();
+                            else
+                                markConnectFailure(result.error);
+
+                            if (!result.connected) {
+                                completeCommand(responseFor(cmdId,
+                                                            v1::CmdStatus::TemporarilyOffline,
+                                                            "Receiver unavailable"));
+                                return;
+                            }
+                            if (!result.complete) {
+                                completeCommand(responseFor(cmdId, v1::CmdStatus::Failure,
+                                                            "Media command could not be sent"));
+                                return;
+                            }
+                            completeCommand(responseFor(cmdId, v1::CmdStatus::Success, {}));
+                        });
     }
 
     // --- the probe --------------------------------------------------------
@@ -948,8 +1014,14 @@ private:
     /// Answers the running channel invoke and moves on.
     void completeCommand(v1::CmdStatus status, const std::string &error)
     {
-        completeCommand(responseFor(m_running ? m_running->channelRequest.cmdId : 0, status,
-                                    error));
+        v1::CmdId cmdId = 0;
+        if (m_running) {
+            if (m_running->kind == Operation::Kind::ChannelInvoke)
+                cmdId = m_running->channelRequest.cmdId;
+            else if (m_running->kind == Operation::Kind::MediaPlayerInvoke)
+                cmdId = m_running->mediaPlayerRequest.cmdId;
+        }
+        completeCommand(responseFor(cmdId, status, error));
     }
 
     void completeCommand(v1::CmdResponse response)
@@ -994,6 +1066,9 @@ private:
             if (op.kind == Operation::Kind::ChannelInvoke) {
                 answerCommand(op.channelRequest.cmdId, v1::CmdStatus::Failure, reason,
                               "channel.invoke.flush");
+            } else if (op.kind == Operation::Kind::MediaPlayerInvoke) {
+                answerCommand(op.mediaPlayerRequest.cmdId, v1::CmdStatus::Failure, reason,
+                              "mediaPlayer.invoke.flush");
             } else if (op.kind == Operation::Kind::ProbeCurrentInput) {
                 answerAction(op.actionRequest.cmdId, v1::CmdStatus::Failure, reason);
             }
