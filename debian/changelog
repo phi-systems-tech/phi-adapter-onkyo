@@ -1,3 +1,10 @@
+phi-adapter-onkyo (0.0~git202610131659.46c389b-1) trixie; urgency=medium
+
+  * Rebuild against SDK 0.22.0, which moves the offsets behind
+    mediaPlayerFeatures in Device while the soname stays .so.0.
+
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Tue, 13 Oct 2026 16:59:59 +0200
+
 phi-adapter-onkyo (0.0~git202609172148.a9d5f2a-1) trixie; urgency=medium
 
   * AdapterFlag is split into AdapterCapability (what a plugin declares
