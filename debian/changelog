@@ -1,3 +1,10 @@
+phi-adapter-onkyo (0.0~git202610241701.fef50cc-1) trixie; urgency=medium
+
+  * Rebuilt against phi-adapter-sdk 0.25.0 (cameraFeatures, voice and
+    camera kinds; ABI)
+
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Sat, 24 Oct 2026 17:01:25 +0200
+
 phi-adapter-onkyo (0.0~git202610221933.dfb7627-1) trixie; urgency=medium
 
   * Rebuilt against phi-adapter-sdk 0.24.0 (RoomClass in v1::Room).
