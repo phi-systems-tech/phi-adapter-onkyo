@@ -45,7 +45,7 @@ protected:
     {
         if (!hasBootstrap())
             return {};
-        return loadConfiguredSliLabels(parseObject(bootstrap().staticConfigJson));
+        return loadConfiguredSliLabels(parseObject(bootstrap().staticConfigJson()));
     }
 
     void onFactoryConfigChanged(const sdk::ConfigChangedRequest &request) override
@@ -107,51 +107,39 @@ protected:
 private:
     v1::ActionResponse handleFactoryActionInvoke(const sdk::AdapterActionInvokeRequest &request)
     {
-        v1::ActionResponse response;
-        response.id = request.cmdId;
-        response.tsMs = nowMs();
+        const v1::CmdId id = request.cmdId();
 
-        if (request.actionId != "probe") {
-            response.status = v1::CmdStatus::NotSupported;
-            response.error = "Factory action not supported";
-            return response;
-        }
+        if (request.actionId() != "probe")
+            return v1::ActionResponse::failure(id, v1::CmdStatus::NotSupported, "Factory action not supported");
 
-        const Json params = parseObject(request.paramsJson);
+        const Json params = parseObject(request.paramsJson());
         const std::vector<std::string> hosts = resolveProbeHosts(params);
         const std::uint16_t port = resolveProbePort(params);
-        if (hosts.empty() || port == 0) {
-            response.status = v1::CmdStatus::InvalidArgument;
-            response.error = "Probe requires host/ip and iscpPort";
-            return response;
-        }
+        if (hosts.empty() || port == 0)
+            return v1::ActionResponse::failure(id, v1::CmdStatus::InvalidArgument,
+                                               "Probe requires host/ip and iscpPort");
 
         const auto cancelled = [this]() { return stopRequested(); };
         std::string lastError;
         for (const std::string &host : hosts) {
             // Each candidate costs a connect; stop early instead of walking the
             // whole list during shutdown (F-33).
-            if (stopRequested()) {
-                response.status = v1::CmdStatus::Failure;
-                response.error = "Probe cancelled: adapter is stopping";
-                response.errorContext = "factory.action";
-                return response;
-            }
+            if (stopRequested())
+                return v1::ActionResponse::failure(id, v1::CmdStatus::Failure,
+                                                   "Probe cancelled: adapter is stopping", {}, "factory.action");
             std::string error;
             if (probeEndpoint(host, port, kProbeTimeout, cancelled, &error)) {
-                response.status = v1::CmdStatus::Success;
-                response.resultType = v1::ActionResultType::String;
-                response.resultValue = host + ":" + std::to_string(port);
+                auto response = v1::ActionResponse::success(id);
+                response.setResult(host + ":" + std::to_string(port), v1::ActionResultType::String);
                 return response;
             }
             if (!error.empty())
                 lastError = error + " (" + host + ":" + std::to_string(port) + ")";
         }
 
-        response.status = v1::CmdStatus::Failure;
-        response.error = lastError.empty() ? "Receiver unavailable" : lastError;
-        response.errorContext = "factory.action";
-        return response;
+        return v1::ActionResponse::failure(id, v1::CmdStatus::Failure,
+                                           lastError.empty() ? "Receiver unavailable" : lastError, {},
+                                           "factory.action");
     }
 
 };

@@ -27,18 +27,14 @@ Status input(const std::string &code) { return Status{StatusKind::Input, false, 
 sdk::ChannelInvokeRequest invoke(std::uint64_t cmdId, const char *channel)
 {
     sdk::ChannelInvokeRequest request;
-    request.cmdId = cmdId;
-    request.deviceExternalId = "dev";
-    request.channelExternalId = channel;
+    request.setCmdId(cmdId).setDeviceExternalId("dev").setChannelExternalId(channel);
     return request;
 }
 
 sdk::MediaPlayerInvokeRequest mediaInvoke(std::uint64_t cmdId, v1::MediaPlayerAction action)
 {
     sdk::MediaPlayerInvokeRequest request;
-    request.cmdId = cmdId;
-    request.deviceExternalId = "dev";
-    request.action = action;
+    request.setCmdId(cmdId).setDeviceExternalId("dev").setAction(action);
     return request;
 }
 
@@ -118,10 +114,10 @@ void testAnInputIsCalledWhateverIsMostSpecific()
     const auto choices = catalog.choices();
     PHI_CHECK_MSG(choices.size() == 3, "%d choices", int(choices.size()));
     if (choices.size() == 3) {
-        PHI_CHECK(choices[0].value == "2E");
-        PHI_CHECK(choices[1].value == "05");
-        PHI_CHECK(choices[2].value == "07");
-        PHI_CHECK(choices[1].label == "Beamer");
+        PHI_CHECK(choices[0].value() == "2E");
+        PHI_CHECK(choices[1].value() == "05");
+        PHI_CHECK(choices[2].value() == "07");
+        PHI_CHECK(choices[1].label() == "Beamer");
     }
 
     // Somebody typing a name instead of a number.
@@ -169,9 +165,9 @@ void testASliderSendsItsLastPositionAndAnswersTheRest()
 
     // The mute in between is untouched, and still ahead of the volume.
     const auto first = queue.take();
-    PHI_CHECK(first.has_value() && first->channelRequest.cmdId == 2);
+    PHI_CHECK(first.has_value() && first->channelRequest.cmdId() == 2);
     const auto second = queue.take();
-    PHI_CHECK(second.has_value() && second->channelRequest.cmdId == 3);
+    PHI_CHECK(second.has_value() && second->channelRequest.cmdId() == 3);
 }
 
 void testAProbeGoesToTheFrontAndNothingIsLostOnADrain()
@@ -181,8 +177,7 @@ void testAProbeGoesToTheFrontAndNothingIsLostOnADrain()
     queue.pushPoll(11, false);
 
     sdk::AdapterActionInvokeRequest probe;
-    probe.cmdId = 99;
-    probe.actionId = "probeCurrentInput";
+    probe.setCmdId(99).setActionId("probeCurrentInput");
     // Somebody is watching a form field for this one.
     queue.pushProbe(probe, 12);
 
@@ -218,9 +213,9 @@ void testMediaPlayerCommandsStayInOrder()
     const auto first = queue.take();
     const auto second = queue.take();
     PHI_CHECK(first.has_value() && first->kind == Operation::Kind::MediaPlayerInvoke
-              && first->mediaPlayerRequest.cmdId == 10);
+              && first->mediaPlayerRequest.cmdId() == 10);
     PHI_CHECK(second.has_value() && second->kind == Operation::Kind::MediaPlayerInvoke
-              && second->mediaPlayerRequest.cmdId == 11);
+              && second->mediaPlayerRequest.cmdId() == 11);
 }
 
 void testDeviceAdvertisesOnlyImplementedMediaControls()
@@ -232,7 +227,7 @@ void testDeviceAdvertisesOnlyImplementedMediaControls()
         | v1::MediaPlayerFeature::Stop
         | v1::MediaPlayerFeature::Next
         | v1::MediaPlayerFeature::Previous;
-    PHI_CHECK(device.mediaPlayerFeatures == expected);
+    PHI_CHECK(device.mediaPlayerFeatures() == expected);
 }
 
 } // namespace

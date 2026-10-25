@@ -64,10 +64,7 @@ v1::AdapterConfigOptionList InputCatalog::choices() const
     v1::AdapterConfigOptionList options;
     options.reserve(keys.size());
     for (const std::string &code : keys) {
-        v1::AdapterConfigOption option;
-        option.value = code;
-        option.label = label(code);
-        options.push_back(std::move(option));
+        options.emplace_back(code, label(code));
     }
     return options;
 }

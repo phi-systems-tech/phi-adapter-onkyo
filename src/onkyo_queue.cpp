@@ -29,18 +29,18 @@ std::vector<v1::CmdId> OperationQueue::pushChannelInvoke(
     dropQueuedPolls();
 
     std::vector<v1::CmdId> superseded;
-    if (request.channelExternalId == kChannelVolume) {
+    if (request.channelExternalId() == kChannelVolume) {
         // A slider produces a stream of these. Only the last one is worth
         // sending; the ones it overtakes are answered by the caller.
         for (auto it = m_queue.begin(); it != m_queue.end();) {
             const bool sameSlider = it->kind == Operation::Kind::ChannelInvoke
-                && it->channelRequest.deviceExternalId == request.deviceExternalId
-                && it->channelRequest.channelExternalId == kChannelVolume;
+                && it->channelRequest.deviceExternalId() == request.deviceExternalId()
+                && it->channelRequest.channelExternalId() == kChannelVolume;
             if (!sameSlider) {
                 ++it;
                 continue;
             }
-            superseded.push_back(it->channelRequest.cmdId);
+            superseded.push_back(it->channelRequest.cmdId());
             it = m_queue.erase(it);
         }
     }

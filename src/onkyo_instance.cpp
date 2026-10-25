@@ -134,8 +134,8 @@ protected:
         const std::vector<std::string> previousHosts = hosts();
         const std::uint16_t previousPort = m_controlPort;
 
-        m_info = request.adapter;
-        m_meta = parseObject(request.adapter.metaJson);
+        m_info = request.adapter();
+        m_meta = parseObject(request.adapter().metaJson());
         normalizeActiveCodesInMeta();
         applyConfig();
 
@@ -167,9 +167,9 @@ protected:
     void onChannelInvoke(const sdk::ChannelInvokeRequest &request) override
     {
         timingLog(str::arg("cmd.recv type=channel.invoke cmdId=%1 channel=%2",
-                           request.cmdId, request.channelExternalId));
+                           request.cmdId(), request.channelExternalId()));
         if (m_lifecycle != Lifecycle::Running) {
-            answerCommand(request.cmdId, v1::CmdStatus::TemporarilyOffline,
+            answerCommand(request.cmdId(), v1::CmdStatus::TemporarilyOffline,
                           "Instance is not running", "channel.invoke");
             return;
         }
@@ -186,19 +186,19 @@ protected:
     void onMediaPlayerInvoke(const sdk::MediaPlayerInvokeRequest &request) override
     {
         timingLog(str::arg("cmd.recv type=mediaPlayer.invoke cmdId=%1 action=%2",
-                           request.cmdId, static_cast<int>(request.action)));
+                           request.cmdId(), static_cast<int>(request.action())));
         if (m_lifecycle != Lifecycle::Running) {
-            answerCommand(request.cmdId, v1::CmdStatus::TemporarilyOffline,
+            answerCommand(request.cmdId(), v1::CmdStatus::TemporarilyOffline,
                           "Instance is not running", "mediaPlayer.invoke");
             return;
         }
-        if (request.deviceExternalId != m_deviceId) {
-            answerCommand(request.cmdId, v1::CmdStatus::NotSupported,
+        if (request.deviceExternalId() != m_deviceId) {
+            answerCommand(request.cmdId(), v1::CmdStatus::NotSupported,
                           "Unknown device", "mediaPlayer.invoke");
             return;
         }
-        if (!mediaPlayerCommand(request.action).has_value()) {
-            answerCommand(request.cmdId, v1::CmdStatus::NotSupported,
+        if (!mediaPlayerCommand(request.action()).has_value()) {
+            answerCommand(request.cmdId(), v1::CmdStatus::NotSupported,
                           "Media player action not supported", "mediaPlayer.invoke");
             return;
         }
@@ -210,10 +210,10 @@ protected:
     void onAdapterActionInvoke(const sdk::AdapterActionInvokeRequest &request) override
     {
         timingLog(str::arg("cmd.recv type=adapter.action.invoke cmdId=%1 action=%2",
-                           request.cmdId, request.actionId));
-        if (request.actionId == "probeCurrentInput") {
+                           request.cmdId(), request.actionId()));
+        if (request.actionId() == "probeCurrentInput") {
             if (m_lifecycle != Lifecycle::Running) {
-                answerAction(request.cmdId, v1::CmdStatus::TemporarilyOffline,
+                answerAction(request.cmdId(), v1::CmdStatus::TemporarilyOffline,
                              "Instance is not running");
                 return;
             }
@@ -221,28 +221,28 @@ protected:
             pump();
             return;
         }
-        if (request.actionId == "settings") {
+        if (request.actionId() == "settings") {
             handleSettings(request);
             return;
         }
-        answerAction(request.cmdId, v1::CmdStatus::NotSupported, "Adapter action not supported");
+        answerAction(request.cmdId(), v1::CmdStatus::NotSupported, "Adapter action not supported");
     }
 
     void onDeviceNameUpdate(const sdk::DeviceNameUpdateRequest &request) override
     {
-        answerCommand(request.cmdId, v1::CmdStatus::NotImplemented,
+        answerCommand(request.cmdId(), v1::CmdStatus::NotImplemented,
                       "Device rename not supported", "device.name.update");
     }
 
     void onDeviceEffectInvoke(const sdk::DeviceEffectInvokeRequest &request) override
     {
-        answerCommand(request.cmdId, v1::CmdStatus::NotImplemented,
+        answerCommand(request.cmdId(), v1::CmdStatus::NotImplemented,
                       "Device effect not supported", "device.effect.invoke");
     }
 
     void onSceneInvoke(const sdk::SceneInvokeRequest &request) override
     {
-        answerCommand(request.cmdId, v1::CmdStatus::NotImplemented,
+        answerCommand(request.cmdId(), v1::CmdStatus::NotImplemented,
                       "Scene invocation not supported", "scene.invoke");
     }
 
@@ -259,7 +259,7 @@ private:
     void applyConfig()
     {
         const std::uint16_t configured = normalizedPort(jsonInt(m_meta, "iscpPort", 0));
-        const std::uint16_t discovered = normalizedPort(static_cast<int>(m_info.port));
+        const std::uint16_t discovered = normalizedPort(static_cast<int>(m_info.port()));
         m_controlPort = resolvedControlPort(configured > 0 ? configured : discovered);
         m_pollIntervalMs = std::clamp(jsonInt(m_meta, "pollIntervalMs", 5000), 500, 300000);
         m_retryIntervalMs = std::clamp(jsonInt(m_meta, "retryIntervalMs", 10000), 1000, 300000);
@@ -309,7 +309,7 @@ private:
         if (*raw == asArray)
             return;
         m_meta["activeSliCodes"] = asArray;
-        m_info.metaJson = dump(m_meta);
+        m_info.setMetaJson(dump(m_meta));
         sendMetaPatch(Json{{"activeSliCodes", asArray}}, "config.normalize");
     }
 
@@ -325,7 +325,7 @@ private:
     std::vector<std::string> hosts() const
     {
         std::vector<std::string> candidates;
-        const std::string ip = str::trimmed(m_info.ip);
+        const std::string ip = str::trimmed(m_info.ip());
         if (!ip.empty())
             candidates.push_back(ip);
         const std::string configured = str::trimmed(jsonString(m_meta, "host"));
@@ -396,19 +396,19 @@ private:
             break;
         case Operation::Kind::ChannelInvoke:
             timingLog(str::arg("cmd.start type=channel.invoke cmdId=%1 channel=%2 waitMs=%3",
-                               m_running->channelRequest.cmdId,
-                               m_running->channelRequest.channelExternalId, waited));
+                               m_running->channelRequest.cmdId(),
+                               m_running->channelRequest.channelExternalId(), waited));
             beginChannelInvoke();
             break;
         case Operation::Kind::MediaPlayerInvoke:
             timingLog(str::arg("cmd.start type=mediaPlayer.invoke cmdId=%1 action=%2 waitMs=%3",
-                               m_running->mediaPlayerRequest.cmdId,
-                               static_cast<int>(m_running->mediaPlayerRequest.action), waited));
+                               m_running->mediaPlayerRequest.cmdId(),
+                               static_cast<int>(m_running->mediaPlayerRequest.action()), waited));
             beginMediaPlayerInvoke();
             break;
         case Operation::Kind::ProbeCurrentInput:
             timingLog(str::arg("cmd.start type=adapter.action.invoke cmdId=%1 waitMs=%2",
-                               m_running->actionRequest.cmdId, waited));
+                               m_running->actionRequest.cmdId(), waited));
             beginProbe();
             break;
         }
@@ -477,7 +477,7 @@ private:
     {
         const sdk::ChannelInvokeRequest request = m_running->channelRequest;
 
-        if (request.deviceExternalId != m_deviceId) {
+        if (request.deviceExternalId() != m_deviceId) {
             completeCommand(v1::CmdStatus::NotSupported, "Unknown device");
             return;
         }
@@ -486,7 +486,7 @@ private:
             return;
         }
 
-        if (request.channelExternalId == kChannelPower) {
+        if (request.channelExternalId() == kChannelPower) {
             writePower(request);
             return;
         }
@@ -520,15 +520,15 @@ private:
             return;
         }
 
-        if (request.channelExternalId == kChannelVolume) {
+        if (request.channelExternalId() == kChannelVolume) {
             writeVolume(request);
             return;
         }
-        if (request.channelExternalId == kChannelMute) {
+        if (request.channelExternalId() == kChannelMute) {
             writeMute(request);
             return;
         }
-        if (request.channelExternalId == kChannelInput) {
+        if (request.channelExternalId() == kChannelInput) {
             writeInput(request);
             return;
         }
@@ -537,21 +537,19 @@ private:
 
     void writePower(const sdk::ChannelInvokeRequest &request)
     {
-        const std::optional<bool> on = scalarToBool(request.value);
+        const std::optional<bool> on = scalarToBool(request.value());
         if (!on.has_value()) {
             completeCommand(v1::CmdStatus::InvalidArgument, "Power expects boolean");
             return;
         }
         const PowerState wanted = *on ? PowerState::On : PowerState::Off;
         if (m_state.power() == wanted) {
-            v1::CmdResponse response = responseFor(request.cmdId, v1::CmdStatus::Success, {});
-            response.finalValue = *on;
-            completeCommand(std::move(response));
+            completeCommand(v1::CmdResponse::success(request.cmdId(), *on));
             return;
         }
 
         m_client->start(requestFor({*on ? "PWR01" : "PWR00"}, false),
-                        [this, on = *on, cmdId = request.cmdId](IscpResult result) {
+                        [this, on = *on, cmdId = request.cmdId()](IscpResult result) {
                             if (result.connected)
                                 markConnectSuccess();
                             else
@@ -561,18 +559,15 @@ private:
                                                 "Receiver unavailable");
                                 return;
                             }
-                            v1::CmdResponse response =
-                                responseFor(cmdId, v1::CmdStatus::Success, {});
-                            response.finalValue = on;
                             if (const auto report = m_state.applyPower(on))
                                 emitReport(*report);
-                            completeCommand(std::move(response));
+                            completeCommand(v1::CmdResponse::success(cmdId, on));
                         });
     }
 
     void writeVolume(const sdk::ChannelInvokeRequest &request)
     {
-        const std::optional<double> wanted = scalarToDouble(request.value);
+        const std::optional<double> wanted = scalarToDouble(request.value());
         if (!wanted.has_value()) {
             completeCommand(v1::CmdStatus::InvalidArgument, "Volume must be numeric");
             return;
@@ -583,7 +578,7 @@ private:
         std::snprintf(hex, sizeof(hex), "%02X", raw & 0xFF);
         const auto rounded = static_cast<std::int64_t>(percent + 0.5);
 
-        writeAndConfirm(request.cmdId, std::string("MVL") + hex, v1::ScalarValue(rounded),
+        writeAndConfirm(request.cmdId(), std::string("MVL") + hex, v1::ScalarValue(rounded),
                         [this, rounded]() {
                             if (const auto report = m_state.applyVolumePercent(rounded))
                                 emitReport(*report);
@@ -592,12 +587,12 @@ private:
 
     void writeMute(const sdk::ChannelInvokeRequest &request)
     {
-        const std::optional<bool> muted = scalarToBool(request.value);
+        const std::optional<bool> muted = scalarToBool(request.value());
         if (!muted.has_value()) {
             completeCommand(v1::CmdStatus::InvalidArgument, "Mute expects boolean");
             return;
         }
-        writeAndConfirm(request.cmdId, *muted ? "AMT01" : "AMT00", v1::ScalarValue(*muted),
+        writeAndConfirm(request.cmdId(), *muted ? "AMT01" : "AMT00", v1::ScalarValue(*muted),
                         [this, muted = *muted]() {
                             if (const auto report = m_state.applyMute(muted))
                                 emitReport(*report);
@@ -606,7 +601,7 @@ private:
 
     void writeInput(const sdk::ChannelInvokeRequest &request)
     {
-        std::string wanted = str::trimmed(scalarToString(request.value));
+        std::string wanted = str::trimmed(scalarToString(request.value()));
         // A user may name an input rather than number it.
         const std::string byLabel = m_inputs.codeForLabel(wanted);
         if (!byLabel.empty())
@@ -620,7 +615,7 @@ private:
                             "Input expects a two-digit SLI code (for example 01)");
             return;
         }
-        writeAndConfirm(request.cmdId, "SLI" + code, v1::ScalarValue(code),
+        writeAndConfirm(request.cmdId(), "SLI" + code, v1::ScalarValue(code),
                         [this, code]() {
                             if (const auto report = m_state.applyInput(code))
                                 emitReport(*report);
@@ -647,11 +642,8 @@ private:
                                 return;
                             }
                             onSuccess();
-                            v1::CmdResponse response =
-                                responseFor(cmdId, v1::CmdStatus::Success, {});
-                            response.finalValue = finalValue;
                             scheduleConfirmationPoll();
-                            completeCommand(std::move(response));
+                            completeCommand(v1::CmdResponse::success(cmdId, finalValue));
                         });
     }
 
@@ -675,7 +667,7 @@ private:
     void beginMediaPlayerInvoke()
     {
         const sdk::MediaPlayerInvokeRequest request = m_running->mediaPlayerRequest;
-        const std::optional<std::string_view> command = mediaPlayerCommand(request.action);
+        const std::optional<std::string_view> command = mediaPlayerCommand(request.action());
         if (!command.has_value()) {
             completeCommand(v1::CmdStatus::NotSupported, "Media player action not supported");
             return;
@@ -686,7 +678,7 @@ private:
         }
 
         m_client->start(requestFor({std::string(*command)}, false),
-                        [this, cmdId = request.cmdId](IscpResult result) {
+                        [this, cmdId = request.cmdId()](IscpResult result) {
                             if (result.connected)
                                 markConnectSuccess();
                             else
@@ -761,26 +753,20 @@ private:
 
         for (const auto &entry : patch.items())
             m_meta[entry.key()] = entry.value();
-        m_info.metaJson = dump(m_meta);
+        m_info.setMetaJson(dump(m_meta));
         m_inputs.applyMeta(m_meta);
 
-        v1::ActionResponse response;
-        response.id = m_running ? m_running->actionRequest.cmdId : 0;
-        response.tsMs = nowMs();
-        response.status = v1::CmdStatus::Success;
-        response.resultType = v1::ActionResultType::String;
-        response.resultValue = code;
+        auto response = v1::ActionResponse::success(m_running ? m_running->actionRequest.cmdId() : 0);
+        response.setResult(code, v1::ActionResultType::String);
         v1::ScalarList activeCodes;
         for (const Json &entry : activeArray) {
             if (entry.is_string())
                 activeCodes.emplace_back(entry.get<std::string>());
         }
-        response.formValues = {
-            {"activeSliCodes", activeCodes},
-            {"currentInputCode", v1::ScalarValue(code)},
-        };
-        response.fieldChoices = {{"activeSliCodes", m_inputs.choices()}};
-        response.reloadLayout = true;
+        response.addFormValue("activeSliCodes", activeCodes);
+        response.addFormValue("currentInputCode", v1::ScalarValue(code));
+        response.addFieldChoices("activeSliCodes", m_inputs.choices());
+        response.setReloadLayout(true);
 
         sendMetaPatch(patch, "probeCurrentInput");
         publishInputChannel();
@@ -791,9 +777,9 @@ private:
 
     void handleSettings(const sdk::AdapterActionInvokeRequest &request)
     {
-        const Json params = parseObject(request.paramsJson);
+        const Json params = parseObject(request.paramsJson());
         if (params.empty()) {
-            answerAction(request.cmdId, v1::CmdStatus::Success, {});
+            answerAction(request.cmdId(), v1::CmdStatus::Success, {});
             return;
         }
 
@@ -823,7 +809,7 @@ private:
 
         for (const auto &entry : patch.items())
             m_meta[entry.key()] = entry.value();
-        m_info.metaJson = dump(m_meta);
+        m_info.setMetaJson(dump(m_meta));
         applyConfig();
         sendMetaPatch(patch, "settings");
         publishInputChannel();
@@ -833,7 +819,7 @@ private:
             m_queue.pushPoll(nowMs(), true);
             pump();
         }
-        answerAction(request.cmdId, v1::CmdStatus::Success, {});
+        answerAction(request.cmdId(), v1::CmdStatus::Success, {});
     }
 
     // --- talking to phi-core ----------------------------------------------
@@ -980,12 +966,7 @@ private:
     static v1::CmdResponse responseFor(v1::CmdId cmdId, v1::CmdStatus status,
                                        const std::string &error)
     {
-        v1::CmdResponse response;
-        response.id = cmdId;
-        response.tsMs = nowMs();
-        response.status = status;
-        response.error = error;
-        return response;
+        return v1::CmdResponse().setId(cmdId).setStatus(status).setError(error);
     }
 
     void answerCommand(v1::CmdId cmdId, v1::CmdStatus status, const std::string &error,
@@ -999,14 +980,8 @@ private:
 
     void answerAction(v1::CmdId cmdId, v1::CmdStatus status, const std::string &error)
     {
-        v1::ActionResponse response;
-        response.id = cmdId;
-        response.tsMs = nowMs();
-        response.status = status;
-        response.error = error;
-        response.resultType = v1::ActionResultType::None;
         v1::Utf8String sendError;
-        if (!sendResult(response, &sendError))
+        if (!sendResult(v1::ActionResponse().setId(cmdId).setStatus(status).setError(error), &sendError))
             log(sdk::LogLevel::Error, sdk::LogCategory::Internal,
                 "failed to send the adapter.action.invoke result: %1", {sendError});
     }
@@ -1017,9 +992,9 @@ private:
         v1::CmdId cmdId = 0;
         if (m_running) {
             if (m_running->kind == Operation::Kind::ChannelInvoke)
-                cmdId = m_running->channelRequest.cmdId;
+                cmdId = m_running->channelRequest.cmdId();
             else if (m_running->kind == Operation::Kind::MediaPlayerInvoke)
-                cmdId = m_running->mediaPlayerRequest.cmdId;
+                cmdId = m_running->mediaPlayerRequest.cmdId();
         }
         completeCommand(responseFor(cmdId, status, error));
     }
@@ -1035,13 +1010,10 @@ private:
 
     void completeAction(v1::CmdStatus status, const std::string &error)
     {
-        v1::ActionResponse response;
-        response.id = m_running ? m_running->actionRequest.cmdId : 0;
-        response.tsMs = nowMs();
-        response.status = status;
-        response.error = error;
-        response.resultType = v1::ActionResultType::None;
-        completeAction(std::move(response));
+        completeAction(v1::ActionResponse()
+                           .setId(m_running ? m_running->actionRequest.cmdId() : 0)
+                           .setStatus(status)
+                           .setError(error));
     }
 
     void completeAction(v1::ActionResponse response)
@@ -1064,13 +1036,13 @@ private:
 
         for (const Operation &op : pending) {
             if (op.kind == Operation::Kind::ChannelInvoke) {
-                answerCommand(op.channelRequest.cmdId, v1::CmdStatus::Failure, reason,
+                answerCommand(op.channelRequest.cmdId(), v1::CmdStatus::Failure, reason,
                               "channel.invoke.flush");
             } else if (op.kind == Operation::Kind::MediaPlayerInvoke) {
-                answerCommand(op.mediaPlayerRequest.cmdId, v1::CmdStatus::Failure, reason,
+                answerCommand(op.mediaPlayerRequest.cmdId(), v1::CmdStatus::Failure, reason,
                               "mediaPlayer.invoke.flush");
             } else if (op.kind == Operation::Kind::ProbeCurrentInput) {
-                answerAction(op.actionRequest.cmdId, v1::CmdStatus::Failure, reason);
+                answerAction(op.actionRequest.cmdId(), v1::CmdStatus::Failure, reason);
             }
         }
     }

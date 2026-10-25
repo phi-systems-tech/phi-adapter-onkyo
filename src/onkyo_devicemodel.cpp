@@ -21,12 +21,12 @@ constexpr auto kReadWriteReport =
 v1::Channel buildInputChannel(const v1::AdapterConfigOptionList &choices)
 {
     v1::Channel input;
-    input.externalId = kChannelInput;
-    input.name = "Input";
-    input.kind = v1::ChannelKind::HdmiInput;
-    input.dataType = v1::ChannelDataType::String;
-    input.flags = kReadWriteReport;
-    input.choices = choices;
+    input.setExternalId(kChannelInput);
+    input.setName("Input");
+    input.setKind(v1::ChannelKind::HdmiInput);
+    input.setDataType(v1::ChannelDataType::String);
+    input.setFlags(kReadWriteReport);
+    input.setChoices(choices);
     return input;
 }
 
@@ -35,40 +35,38 @@ v1::ChannelList buildChannels(const v1::AdapterConfigOptionList &inputChoices)
     v1::ChannelList channels;
 
     v1::Channel power;
-    power.externalId = kChannelPower;
-    power.name = "Power";
-    power.kind = v1::ChannelKind::PowerOnOff;
-    power.dataType = v1::ChannelDataType::Bool;
-    power.flags = kReadWriteReport;
+    power.setExternalId(kChannelPower);
+    power.setName("Power");
+    power.setKind(v1::ChannelKind::PowerOnOff);
+    power.setDataType(v1::ChannelDataType::Bool);
+    power.setFlags(kReadWriteReport);
     channels.push_back(std::move(power));
 
     v1::Channel volume;
-    volume.externalId = kChannelVolume;
-    volume.name = "Volume";
-    volume.kind = v1::ChannelKind::Volume;
-    volume.dataType = v1::ChannelDataType::Int;
-    volume.flags = kReadWriteReport;
-    volume.minValue = 0.0;
-    volume.maxValue = 100.0;
-    volume.stepValue = 1.0;
+    volume.setExternalId(kChannelVolume);
+    volume.setName("Volume");
+    volume.setKind(v1::ChannelKind::Volume);
+    volume.setDataType(v1::ChannelDataType::Int);
+    volume.setFlags(kReadWriteReport);
+    volume.setRange(0.0, 100.0, 1.0);
     channels.push_back(std::move(volume));
 
     v1::Channel mute;
-    mute.externalId = kChannelMute;
-    mute.name = "Mute";
-    mute.kind = v1::ChannelKind::Mute;
-    mute.dataType = v1::ChannelDataType::Bool;
-    mute.flags = kReadWriteReport;
+    mute.setExternalId(kChannelMute);
+    mute.setName("Mute");
+    mute.setKind(v1::ChannelKind::Mute);
+    mute.setDataType(v1::ChannelDataType::Bool);
+    mute.setFlags(kReadWriteReport);
     channels.push_back(std::move(mute));
 
     channels.push_back(buildInputChannel(inputChoices));
 
     v1::Channel connectivity;
-    connectivity.externalId = kChannelConnectivity;
-    connectivity.name = "Connectivity";
-    connectivity.kind = v1::ChannelKind::ConnectivityStatus;
-    connectivity.dataType = v1::ChannelDataType::Enum;
-    connectivity.flags = v1::ChannelFlag::Readable | v1::ChannelFlag::Reportable;
+    connectivity.setExternalId(kChannelConnectivity);
+    connectivity.setName("Connectivity");
+    connectivity.setKind(v1::ChannelKind::ConnectivityStatus);
+    connectivity.setDataType(v1::ChannelDataType::Enum);
+    connectivity.setFlags(v1::ChannelFlag::Readable | v1::ChannelFlag::Reportable);
     channels.push_back(std::move(connectivity));
 
     return channels;
@@ -79,8 +77,8 @@ std::string resolveDeviceId(const v1::Adapter &info, const Json &meta, const std
     const std::string uuid = str::trimmed(jsonString(meta, "deviceUuid"));
     if (!uuid.empty())
         return uuid;
-    if (!info.externalId.empty())
-        return info.externalId;
+    if (!info.externalId().empty())
+        return info.externalId();
     if (!host.empty())
         return host;
     return "onkyo-pioneer";
@@ -92,25 +90,25 @@ v1::Device buildDevice(const std::string &deviceId,
                        const std::string &host)
 {
     v1::Device device;
-    device.externalId = deviceId;
-    device.deviceClass = v1::DeviceClass::MediaPlayer;
-    device.mediaPlayerFeatures = v1::MediaPlayerFeature::Play
+    device.setExternalId(deviceId);
+    device.setDeviceClass(v1::DeviceClass::MediaPlayer);
+    device.setMediaPlayerFeatures(v1::MediaPlayerFeature::Play
         | v1::MediaPlayerFeature::Pause
         | v1::MediaPlayerFeature::Stop
         | v1::MediaPlayerFeature::Next
-        | v1::MediaPlayerFeature::Previous;
+        | v1::MediaPlayerFeature::Previous);
 
-    const std::string adapterName = str::trimmed(info.name);
+    const std::string adapterName = str::trimmed(info.name());
     const std::string metaName = str::trimmed(jsonString(meta, "deviceName"));
     if (!adapterName.empty())
-        device.name = adapterName;
+        device.setName(adapterName);
     else if (!metaName.empty())
-        device.name = metaName;
+        device.setName(metaName);
     else
-        device.name = host;
+        device.setName(host);
 
     const std::string manufacturer = str::trimmed(jsonString(meta, "manufacturer"));
-    device.manufacturer = manufacturer.empty() ? "Onkyo & Pioneer" : manufacturer;
+    device.setManufacturer(manufacturer.empty() ? "Onkyo & Pioneer" : manufacturer);
 
     std::string model = str::trimmed(jsonString(meta, "model"));
     if (model.empty()) {
@@ -118,7 +116,7 @@ v1::Device buildDevice(const std::string &deviceId,
             host,
             jsonString(meta, "deviceUuid"),
             metaName,
-            info.name,
+            info.name(),
         };
         for (const std::string &candidate : candidates) {
             model = inferModelFromIdentifier(candidate);
@@ -126,14 +124,14 @@ v1::Device buildDevice(const std::string &deviceId,
                 break;
         }
     }
-    device.model = model;
+    device.setModel(model);
 
     Json deviceMeta = Json::object();
     if (jsonBool(meta, "supportsSpotify"))
         deviceMeta["supportsSpotify"] = true;
     if (jsonBool(meta, "supportsTranscoder"))
         deviceMeta["supportsTranscoder"] = true;
-    device.metaJson = dump(deviceMeta);
+    device.setMetaJson(dump(deviceMeta));
 
     return device;
 }
