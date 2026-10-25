@@ -1,3 +1,9 @@
+phi-adapter-onkyo (0.0~git202610251146.c62658b-1) trixie; urgency=medium
+
+  * Rebuilt against phi-adapter-sdk 0.26.0: accessors instead of fields
+
+ -- Marius Schumacher <marius.schumacher@phisys.com>  Sun, 25 Oct 2026 11:46:36 +0100
+
 phi-adapter-onkyo (0.0~git202610241701.fef50cc-1) trixie; urgency=medium
 
   * Rebuilt against phi-adapter-sdk 0.25.0 (cameraFeatures, voice and
