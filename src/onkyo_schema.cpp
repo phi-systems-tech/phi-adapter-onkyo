@@ -133,7 +133,8 @@ v1::AdapterCapabilities capabilities()
     v1::AdapterCapabilities caps;
     caps.setRequired(v1::AdapterRequirement::Host | v1::AdapterRequirement::Port)
         .setOptional(v1::AdapterRequirement::UsesRetryInterval)
-        .setFlags(v1::AdapterCapability::None);
+        .setFlags(v1::AdapterCapability::None)
+        .setTopologies(v1::Topology::Local);
 
     v1::AdapterActionDescriptor probe("probe", "Test connection",
                                       "Validate receiver reachability using the current config values.");
